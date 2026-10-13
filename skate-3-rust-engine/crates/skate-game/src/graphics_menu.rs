@@ -130,6 +130,15 @@ impl Menu {
         self.status = status;
         self.open = !resume;
     }
+    pub(crate) fn set_status(&mut self, status: String) {
+        self.status = status;
+    }
+    pub(crate) fn show_imported_maps(&mut self, assets: &std::path::Path) {
+        self.maps = crate::map_library::discover(assets);
+        self.open = true;
+        self.select_section(0);
+        self.map_detail = false;
+    }
 }
 pub(crate) fn gameplay_active(menu: Option<Res<Menu>>) -> bool {
     menu.is_none_or(|m| !m.open)
@@ -143,6 +152,7 @@ const SECTIONS: &[(&str, &str)] = &[
     ("GRAPHICS", "Dial in your display, performance and sound."),
     ("MULTIPLAYER", "A session is better with friends."),
     ("EXTRAS", "Mods, updates and more."),
+    ("CONTROLS", "Keyboard, mouse and the connected pad."),
 ];
 #[derive(Component)] struct MenuTitle;
 #[derive(Component)] struct MenuSubtitle;
@@ -167,11 +177,16 @@ impl Menu {
                 }
                 rows
             }
-            0 => (1000..1000 + self.maps.len()).collect(),
+            0 => {
+                let mut rows = vec![60, 61];
+                rows.extend(1000..1000 + self.maps.len());
+                rows
+            }
             1 if self.difficulty == Difficulty::Custom => std::iter::once(3).chain(300..337).chain([CAMERA_ANGLE_ROW,8,10]).collect(),
             1 => vec![3, CAMERA_ANGLE_ROW, 8, 10],
             2 => vec![0, 1, 2, 13, 16, 17, 18, FRAME_STATS_ROW],
             4 => vec![7, 11, 14, 19],
+            5 => vec![4, 9, 15],
             i if i >= SECTIONS.len() => self.custom_sections.get(i-SECTIONS.len()).map_or(Vec::new(), |(_,entries)| (200..200+entries.len()).collect()),
             _ => Vec::new(),
         }
@@ -305,7 +320,7 @@ fn setup(
                 body.spawn((Text::new(""),MenuSubtitle,TextFont {font_size:16.,..default()},TextColor(Color::srgb(0.65,0.72,0.72))));
                 body.spawn((Node {height:px(3),width:px(64),margin:UiRect::bottom(px(10)),..default()},BackgroundColor(Color::srgb(0.78,0.96,0.3))));
                 body.spawn((MenuScroll,ScrollPosition::default(),Node {flex_grow:1.,min_height:px(0),overflow:Overflow::scroll_y(),flex_direction:FlexDirection::Column,row_gap:px(8),..default()})).with_children(|list| {
-                    for i in (0..4).chain(300..337).chain(4..10).chain(11..20).chain(20..27).chain([10,FRAME_STATS_ROW]).chain(200..264).chain([50,51]).chain(1000..1000+maps.len()).chain(1_000_000..1_000_000+destinations.len()) {
+                    for i in (0..4).chain(300..337).chain(4..10).chain(11..20).chain(20..27).chain([10,FRAME_STATS_ROW,60,61]).chain(200..264).chain([50,51]).chain(1000..1160).chain(1_000_000..1_000_000+destinations.len()) {
                         list.spawn((Button,MenuRow(i),Node {flex_direction:if (300..335).contains(&i) {FlexDirection::Column} else {FlexDirection::Row},width:percent(100),min_height:px(56),flex_shrink:0.,padding:UiRect::axes(px(18),px(12)),align_items:AlignItems::Center,border_radius:BorderRadius::all(px(4)),..default()},BackgroundColor(Color::srgb(0.075,0.09,0.095))))
                             .with_children(|row| {
                                 row.spawn((MenuLabel(i),Text::new(""),TextFont {font_size:18.,..default()},TextColor(Color::WHITE)));
@@ -378,7 +393,13 @@ pub(crate) fn interact(
     mut exit: MessageWriter<AppExit>,
     mut net: ResMut<crate::multiplayer::Multiplayer>,
     mut typing: MessageReader<bevy::input::keyboard::KeyboardInput>,
-    (mut updater, mut audio, mut camera_angle): (ResMut<crate::updater::Updater>, ResMut<crate::game_audio::AudioSettings>, ResMut<crate::camera::CameraAngleSettings>),
+    (mut updater, mut audio, mut camera_angle, mut keyboard, mut imports): (
+        ResMut<crate::updater::Updater>,
+        ResMut<crate::game_audio::AudioSettings>,
+        ResMut<crate::camera::CameraAngleSettings>,
+        ResMut<crate::input::keyboard::VirtualPad>,
+        ResMut<crate::map_import::MapImport>,
+    ),
     travel: Res<crate::teleport_menu::Travel>,
     mut mods: ResMut<crate::modding::ModMenu>,
 ) {
@@ -448,7 +469,9 @@ pub(crate) fn interact(
             menu.selected = visible[(index + 1) % rows];
         }
         let adjustable = (menu.section == 1 && menu.difficulty == Difficulty::Custom && (300..335).contains(&menu.selected)) || (menu.daylight && menu.selected < 3) || (!menu.multiplayer && !menu.daylight && (menu.selected < 4 || AUDIO_ROWS.contains(&menu.selected) || menu.selected == FRAME_STATS_ROW))
-            || (!menu.multiplayer && !menu.daylight && menu.section == 1 && menu.selected == CAMERA_ANGLE_ROW);
+            || (!menu.multiplayer && !menu.daylight && menu.section == 1 && menu.selected == CAMERA_ANGLE_ROW)
+            || (menu.section == 5 && matches!(menu.selected, 4 | 9 | 15))
+            || (menu.section == 0 && menu.selected == 60);
         if adjustable && (keys.just_pressed(KeyCode::ArrowLeft) || nav.pressed & 4 != 0) {
             action = Some((menu.selected, -1));
         }
@@ -630,6 +653,25 @@ pub(crate) fn interact(
                     let now = if s.frame_stats { (true, s.frame_stats_simple) } else { (false, false) };
                     (s.frame_stats, s.frame_stats_simple) = cycle(&modes, now, direction);
                 }
+                60 => {
+                    let coarse = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+                    imports.nudge_scale(direction, coarse);
+                    menu.status = match imports.save() {
+                        Ok(()) => imports.scale_label(),
+                        Err(error) => format!("Applied, but could not save: {error}"),
+                    };
+                }
+                61 if direction > 0 => {
+                    imports.begin_dialog(config.asset_root.clone());
+                    menu.status = "Choose an FBX file. Import continues in the background.".into();
+                }
+                4 | 9 | 15 if menu.section == 5 => {
+                    let coarse = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+                    menu.status = keyboard.adjust(row, direction, coarse);
+                    if let Err(error) = keyboard.save() {
+                        menu.status = format!("Applied, but could not save: {error}");
+                    }
+                }
                 _ => {}
             }
         }
@@ -730,7 +772,12 @@ fn labels(
     mut headings: Query<(&mut Text, Has<MenuTitle>), (Or<(With<MenuTitle>, With<MenuSubtitle>)>, Without<StatusLabel>)>,
     mut status: Single<&mut Text, With<StatusLabel>>,
     debug: (Res<crate::modding::Mods>, Res<crate::physics::GamePhysics>, Res<crate::multiplayer::appearance::Appearances>, Res<crate::input::ControllerInput>),
-    (audio, camera_angle): (Option<Res<crate::game_audio::AudioSettings>>, Res<crate::camera::CameraAngleSettings>),
+    (audio, camera_angle, keyboard, imports): (
+        Option<Res<crate::game_audio::AudioSettings>>,
+        Res<crate::camera::CameraAngleSettings>,
+        Res<crate::input::keyboard::VirtualPad>,
+        Res<crate::map_import::MapImport>,
+    ),
     mut buttons: Query<(&MenuRow, &Interaction, &mut BackgroundColor, &mut Node), Without<MenuRoot>>,
 ) {
     root.display = if menu.open && !travel.open && !customiser.open && !custom_models.open && !mods.open {
@@ -769,7 +816,7 @@ fn labels(
     let s = &menu.settings;
     let size = s.internal_size(window.physical_size());
     for (label, mut text) in &mut labels {
-        **text = if (100..113).contains(&label.0) {
+        **text = if (100..120).contains(&label.0) {
             let i=label.0-100;
             let name=SECTIONS.get(i).map(|s|s.0).or_else(||menu.custom_sections.get(i.saturating_sub(SECTIONS.len())).map(|(n,_)|n.as_str())).unwrap_or("");
             format!("{:02}   {}",i+1,name)
@@ -843,6 +890,12 @@ fn labels(
                 15 => "Debug".into(),
                 _ => "<  Multiplayer".into(),
             }
+        } else if label.0 == 60 {
+            imports.scale_label()
+        } else if label.0 == 61 {
+            if imports.busy() { "Importing...".into() } else { "Import FBX map...".into() }
+        } else if menu.section == 5 {
+            keyboard.label(label.0)
         } else {
             match label.0 {
                 0 => format!("Resolution          {} x {}", s.width, s.height),
@@ -1072,7 +1125,7 @@ mod tests {
             assert!(rows.contains(&menu.selected));
             assert!(rows.windows(2).all(|pair| pair[0] < pair[1]));
             // Audio, controller identity, and frame-time rows are spawned.
-            assert!(rows.iter().all(|id| *id < 20 || *id == FRAME_STATS_ROW || *id >= 1000));
+            assert!(rows.iter().all(|id| *id < 20 || *id == FRAME_STATS_ROW || matches!(*id, 60 | 61) || *id >= 1000));
         }
         menu.select_section(1);
         assert_eq!(menu.rows(),vec![3,CAMERA_ANGLE_ROW,8,10]);
@@ -1080,7 +1133,9 @@ mod tests {
         menu.select_section(SECTIONS.len());
         assert_eq!(menu.rows(),vec![200]);
         menu.select_section(0);
-        assert_eq!(menu.rows(), (1000..1040).collect::<Vec<_>>());
+        let mut map_rows = vec![60, 61];
+        map_rows.extend(1000..1040);
+        assert_eq!(menu.rows(), map_rows);
         menu.maps[0].path = Some(PathBuf::from("University.skate"));
         menu.destinations = vec![
             crate::teleport_menu::Destination { id: "uni".into(), name: "Campus".into(), map: "University".into(), matrix: Some([[0.;4];4]) },
@@ -1091,8 +1146,10 @@ mod tests {
         menu.select_section(0);
         menu.maps.clear();
         menu.select_section(0);
-        assert_eq!(menu.selected, 100);
-        assert!(menu.rows().is_empty());
+        assert_eq!(menu.selected, 60);
+        assert_eq!(menu.rows(), vec![60, 61]);
+        menu.select_section(5);
+        assert_eq!(menu.rows(), vec![4, 9, 15]);
         menu.select_section(3);
         assert!(menu.multiplayer);
         assert_eq!(menu.rows(), vec![2,6,13,14,15]);

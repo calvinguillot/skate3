@@ -12,6 +12,7 @@ mod gesture_mapping_data;
 pub(crate) mod gesture_mapping;
 pub(crate) mod gesture_input;
 pub(crate) mod platform;
+pub(crate) mod keyboard;
 pub(crate) use controllers::{ControllerInput, ControllerStatus, RawInput};
 use skate_core::input::tick::TickInput;
 
@@ -33,9 +34,14 @@ impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ControllerInput>()
             .init_resource::<PublishedTickInput>()
-            .add_systems(Startup, start_controllers)
-            .add_systems(PreUpdate, poll_controllers.run_if(crate::graphics_menu::gameplay_active))
-            .add_systems(FixedUpdate, publish_actions.in_set(SimulationSet::Input));
+            .init_resource::<keyboard::VirtualPad>()
+            .add_systems(Startup, (start_controllers, load_keyboard).chain())
+            .add_systems(PreUpdate, (
+                keyboard::accumulate_mouse.after(bevy::input::InputSystems),
+                poll_controllers.run_if(crate::graphics_menu::gameplay_active).after(keyboard::accumulate_mouse),
+            ))
+            .add_systems(FixedUpdate, (keyboard::step_stick, publish_actions).chain().in_set(SimulationSet::Input))
+            .add_systems(Update, keyboard::capture_cursor);
     }
 }
 
@@ -103,17 +109,31 @@ fn start_controllers(config: Res<crate::config::Config>) {
     let _ = platform::poll(0);
 }
 
-pub(crate) fn poll_controllers(mut input: ResMut<ControllerInput>,config:Res<crate::config::Config>,net:Option<Res<crate::multiplayer::Multiplayer>>,windows:Query<&Window>,mut capabilities:Local<[platform::CapabilityCache;4]>) {
+fn load_keyboard(config: Res<crate::config::Config>, mut pad: ResMut<keyboard::VirtualPad>) {
+    *pad = keyboard::VirtualPad::load(&config.asset_root);
+}
+
+pub(crate) fn poll_controllers(mut input: ResMut<ControllerInput>,config:Res<crate::config::Config>,net:Option<Res<crate::multiplayer::Multiplayer>>,windows:Query<&Window>,mut capabilities:Local<[platform::CapabilityCache;4]>,pad:Res<keyboard::VirtualPad>,keys:Res<ButtonInput<KeyCode>>,mouse:Res<ButtonInput<MouseButton>>) {
     let previous = input.status;
     let previous_kinds = input.kinds.clone();
     let focused=windows.iter().any(|w|w.focused);
     let active=net.is_some_and(|n|n.active());
-    input.collect(std::array::from_fn(|slot| {
+    let mut samples = std::array::from_fn(|slot| {
         if active && ((!focused && config.multiplayer.controller.is_none()) || config.multiplayer.controller.is_some_and(|selected|selected as usize!=slot)) {
             capabilities[slot].invalidate();
             Err(platform::DeviceError::Disconnected)
         } else {platform::poll_cached(slot, &mut capabilities[slot])}
-    }));
+    });
+    // A keyboard stands in for a missing pad, and adds to a pad that is already there.
+    if focused {
+        let keyboard = pad.xbox_state(&keys, &mouse);
+        let slot = samples.iter().position(|sample| sample.is_ok()).unwrap_or(0);
+        match &mut samples[slot] {
+            Ok(packet) => keyboard::merge_state(&mut packet.state, &keyboard),
+            Err(_) => samples[slot] = Ok(keyboard::keyboard_packet(keyboard)),
+        }
+    }
+    input.collect(samples);
     for (index, (&before, &after)) in previous.iter().zip(&input.status).enumerate() {
         if before != after {
             match after {

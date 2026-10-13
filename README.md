@@ -86,25 +86,19 @@ The mouse pointer is hidden and locked to the window while you skate, and it com
 
 `fbx/laru_LOD_40cm_scale_1.fbx` is one mesh of 749,105 vertices and 496,302 triangles, with 501 materials and an embedded PNG on each. It was exported from Blender 4.1.1 in centimetres with an object scale of 100, so its vertex values are metres. At scale 1.0 the map is about 3.04 km by 3.22 km, with 66.5 m between its lowest and highest points. The triangles are large for skating, so buildings and ground will feel coarse. A scale of 0.1 makes it about 304 m by 322 m.
 
-Imported maps are written as `.skate` files into the installation's `maps` folder and show up in the in-game map list.
+The importer is the `skate-map-import` library in the engine. `import_file` reads a binary FBX and writes a portable SKATE09 `.skate` file (zlib-compressed texture and geometry blocks) plus `<name>.import.json`, so the same options can be reused. It parses the package back and runs the portable runtime checks before anything is written. The game flag `--import-map`, the in-game import page, and dropping an FBX on the window are not wired up yet; they should call `import_file` and pass the installation `maps` folder.
 
-From the built executable:
+`ImportOptions` is the public control surface:
 
-```bat
-skate3rust.exe --import-map ..\..\fbx\laru_LOD_40cm_scale_1.fbx --scale 1.0 --collision full --floor
-```
+- `scale` multiplies the real-world size. The map is always recentred so its bounding-box centre is at the horizontal origin and its lowest point is at y = 0.
+- `collision` `full` (the default) keeps every non-degenerate triangle. `grid:2` clusters vertices onto a 2 m grid.
+- `floor` adds a flat catch plane just under the mesh, extended past the bounds.
+- `spawn` is an optional `[x, y, z]` in final map metres. When it is omitted, the importer looks for flat upward ground under the centre, then nearby. `heading` is yaw in radians, the same value the `.skate` file stores.
+- `crop` is an optional XZ rectangle `[x0, z0, x1, z1]` in metres after scaling and before recentring. Triangles whose centre falls outside are dropped.
+- `max_texture` caps the longest texture edge in pixels. 0 keeps the embedded PNG size.
+- `surface` is the physics surface. 1 is smooth and 2 is rough. Audio is concrete (id 3), matching the demo map writer. Mesh edges are not grindable; only authored rails are.
 
-- `--scale` multiplies the real-world size. The map is recentred so its middle is at the origin and its lowest point is at ground level.
-- `--collision full` uses every triangle. `--collision grid:2` clusters vertices onto a 2 m grid, which suits denser meshes than this one.
-- `--floor` adds a flat catch plane under the map.
-- `--spawn x,y,z` and `--heading degrees` override the automatic spawn, which looks for flat ground near the centre.
-- `--crop x0,z0,x1,z1` keeps one district, in metres after scaling.
-- `--max-texture 512` caps texture dimensions.
-- `--surface 1` sets the riding surface. 1 is smooth and 2 is rough.
-
-The same choices are saved beside the map as `<name>.import.json`.
-
-In the game, the MAPS page has an import scale and **Import FBX map...**, which opens a file dialog and converts in the background. Dropping an `.fbx` file onto the window does the same thing with the scale shown in the menu.
+Collision triangles use that physics id, packed the way wheel probes read a surface tag, so a large map does not turn into water by accident. The default collision mesh is the full render mesh. The menu import includes the catch floor. Shift plus Left or Right changes the scale by 0.1.
 
 Grind rails are not detected from the mesh. Put a `<map>.rails.json` next to the FBX to add them, with coordinates in metres after scaling and recentring:
 

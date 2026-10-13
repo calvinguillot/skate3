@@ -1,0 +1,12 @@
+[package]
+name = "skate-map-import"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+skate-data = { path = "../skate-data" }
+flate2 = "=1.1.10"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+serde.workspace = true
+serde_json.workspace = true

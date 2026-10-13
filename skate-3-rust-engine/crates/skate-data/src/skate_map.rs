@@ -4,6 +4,7 @@
 use std::{io::Read, path::Path, time::Instant};
 mod texture_decode;
 mod storage_v15;
+mod writer;
 
 #[derive(Debug, PartialEq)]
 pub struct SkateMap {

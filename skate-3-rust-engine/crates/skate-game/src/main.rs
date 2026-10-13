@@ -20,6 +20,7 @@ mod config;
 mod setup;
 mod updater;
 mod map_library;
+mod map_import;
 mod map_render;
 mod map_transition;
 mod difficulty;
@@ -70,6 +71,7 @@ fn main() -> bevy::app::AppExit {
     // Setup tool mode: `--extract-ocean-pca <default.xex> <ocean-pca.json>`.
     // Before the crash supervisor, whose report window would block setup on
     // a failed (non-zero) extraction.
+    if let Some(code) = map_import::cli() { std::process::exit(code); }
     if let Some(code) = extract_ocean_pca() { std::process::exit(code); }
     // Setup tool mode: `--extract-menu-tables <default.xex> <menu-tables.json>`.
     if let Some(code) = extract_menu_tables() { std::process::exit(code); }
