@@ -1,0 +1,25 @@
+# Converted game and disc image. These stay next to the source so the
+# engine can find them, and they are never committed.
+skate3rust-windows-x64-build-46/
+skate3rust-windows-x64/
+skate_iso/
+
+# The temporary engine clone used while setting up the subtree.
+skate-3-rust-engine-upstream/
+
+# Archives.
+*.zip
+*.7z
+*.rar
+*.iso
+
+# Large source art. Custom maps and characters live on disk, not in git.
+*.fbx
+*.blend
+*.glb
+*.gltf
+
+# Build output if it ever lands at the workspace root. The engine's own
+# .gitignore covers target/ and bin/ inside skate-3-rust-engine/.
+/target/
+/bin/
