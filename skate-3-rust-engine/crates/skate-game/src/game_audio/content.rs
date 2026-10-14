@@ -411,7 +411,7 @@ mod tests {
         crate::config::Config {
             asset_root: root.to_owned(), verification_capture: None, map: None, map_path: None,
             difficulty: Default::default(), check_assets: false, validate_maps: false, start_paused: false,
-            multiplayer: Default::default(), map_fingerprint: 0, teleport: None, mute: true,
+            multiplayer: Default::default(), map_fingerprint: 0, teleport: None, mute: true, startup_notice: None,
         }
     }
 

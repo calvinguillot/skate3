@@ -73,8 +73,19 @@ impl std::fmt::Display for ImportReport {
 }
 
 pub fn import_file(source: &Path, output_dir: &Path, options: &ImportOptions) -> Result<ImportReport, String> {
+    let source_bytes = std::fs::metadata(source).map_err(|e| format!("{}: {e}", source.display()))?.len();
+    if let Some(reason) = skate_data::load_budget::reject_import_source(source_bytes) {
+        return Err(format!("{}: {reason}", source.display()));
+    }
     let bytes = std::fs::read(source).map_err(|e| format!("{}: {e}", source.display()))?;
     let (mut map, mut report) = convert_bytes(&bytes, options)?;
+    if let Some(reason) = skate_data::load_budget::reject_package_shape(
+        map.geometry.vertices.len() as u64,
+        (map.geometry.indices.len() / 3) as u64,
+        map.geometry.collision.len() as u64,
+    ) {
+        return Err(format!("{reason} Nothing was written."));
+    }
     if load_rails(source, &mut map)? {
         report.warnings.push("Loaded grind rails from the sidecar JSON.".into());
     }
@@ -631,6 +642,15 @@ mod tests {
         assert_eq!(map.spawn, [1.0, 2.0, 3.0]);
         assert!(report.width_m > 0.0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_an_oversized_fbx_before_it_is_read() {
+        let city = skate_data::load_budget::reject_import_source(1_545_792_236).unwrap();
+        assert!(city.contains("1474 MB"), "{city}");
+        assert!(city.contains("768 MB"), "{city}");
+        assert!(city.contains("Nothing was imported"), "{city}");
+        assert!(skate_data::load_budget::reject_import_source(71_701_068).is_none());
     }
 
     #[test]

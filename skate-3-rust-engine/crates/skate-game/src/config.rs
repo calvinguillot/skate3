@@ -17,6 +17,8 @@ pub(crate) struct Config {
     pub teleport: Option<String>,
     /// `--mute`: no game or mod audio (game_audio).
     pub mute: bool,
+    /// Shown in the pause menu when the saved map was skipped.
+    pub startup_notice: Option<String>,
 }
 
 impl Config {
@@ -34,9 +36,11 @@ impl Config {
             map_fingerprint: 0,
             teleport: None,
             mute: false,
+            startup_notice: None,
         };
         let mut difficulty_override = None;
         let mut explicit_map = false;
+        let mut force_start_park = false;
         let mut args = std::env::args_os().skip(1);
         while let Some(arg) = args.next() {
             match arg.to_str() {
@@ -69,15 +73,37 @@ impl Config {
                     config.asset_root = args.next().ok_or("--assets requires a directory")?.into()
                 }
                 Some("--map") => {
+                    if force_start_park {
+                        return Err("--start-park cannot be combined with --map, --test-world, or --validate-maps".into());
+                    }
                     let path = PathBuf::from(args.next().ok_or("--map requires a .skate file")?);
                     config.map = Some(skate_data::skate_map::SkateMap::load(&path)?);
                     config.map_path = Some(path.canonicalize().map_err(|e| e.to_string())?);
                     explicit_map = true;
                 }
-                Some("--test-world") => { explicit_map = true; config.map = None; config.map_path = None; }
+                Some("--start-park") => {
+                    if explicit_map {
+                        return Err("--start-park cannot be combined with --map, --test-world, or --validate-maps".into());
+                    }
+                    force_start_park = true;
+                }
+                Some("--test-world") => {
+                    if force_start_park {
+                        return Err("--start-park cannot be combined with --map, --test-world, or --validate-maps".into());
+                    }
+                    explicit_map = true;
+                    config.map = None;
+                    config.map_path = None;
+                }
                 Some("--check-assets") => config.check_assets = true,
                 // Maps arrive on stdin; never load the saved default map.
-                Some("--validate-maps") => { config.validate_maps = true; explicit_map = true; }
+                Some("--validate-maps") => {
+                    if force_start_park {
+                        return Err("--start-park cannot be combined with --map, --test-world, or --validate-maps".into());
+                    }
+                    config.validate_maps = true;
+                    explicit_map = true;
+                }
                 Some("--start-paused") => config.start_paused = true,
                 Some("--mute") => config.mute = true,
                 Some("--teleport") => config.teleport = Some(args.next().ok_or("--teleport requires a destination ID")?.to_string_lossy().into_owned()),
@@ -94,7 +120,7 @@ impl Config {
                 }
                 _ => {
                     return Err(format!(
-                        "Unknown argument {arg:?}. Usage: skate3rust [--assets DIRECTORY] [--map MAP.skate | --test-world] [--difficulty easy|normal|hardcore|motorized|custom] [--verify CAPTURE.png] [--check-assets | --validate-maps] [--start-paused] [--mute]"
+                        "Unknown argument {arg:?}. Usage: skate3rust [--assets DIRECTORY] [--map MAP.skate | --test-world | --start-park] [--difficulty easy|normal|hardcore|motorized|custom] [--verify CAPTURE.png] [--check-assets | --validate-maps] [--start-paused] [--mute]"
                     ));
                 }
             }
@@ -108,9 +134,51 @@ impl Config {
             None => crate::difficulty::Difficulty::load(&config.asset_root)?,
         };
         if !explicit_map {
-            if let Some(path) = crate::map_library::default_map(&config.asset_root)? {
-                config.map = Some(skate_data::skate_map::SkateMap::load(&path)?);
-                config.map_path = Some(path.canonicalize().map_err(|e| e.to_string())?);
+            let saved = if force_start_park {
+                None
+            } else {
+                crate::map_library::default_map(&config.asset_root)?
+            };
+            let park = crate::map_library::start_park(&config.asset_root);
+            let mut saved_map = None;
+            let mut saved_error = None;
+            let saved_playable = if let Some(path) = &saved {
+                match skate_data::skate_map::SkateMap::load(path) {
+                    Ok(map) => {
+                        saved_map = Some(map);
+                        true
+                    }
+                    Err(error) => {
+                        saved_error = Some(error);
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            match crate::map_library::select_launch(force_start_park, saved.as_deref(), saved_playable, park.as_deref())? {
+                crate::map_library::LaunchTarget::Map(path) if saved_playable && saved.as_ref() == Some(&path) => {
+                    config.map = saved_map;
+                    config.map_path = Some(path.canonicalize().map_err(|e| e.to_string())?);
+                }
+                crate::map_library::LaunchTarget::Map(path) => {
+                    if let Some(error) = saved_error {
+                        eprintln!("SAVED_MAP_SKIPPED {error}");
+                        config.startup_notice = Some(format!(
+                            "Saved map was not loaded.\n{error}\nStarting Start Park. The saved map choice was left unchanged."
+                        ));
+                    }
+                    config.map = Some(skate_data::skate_map::SkateMap::load(&path)?);
+                    config.map_path = Some(path.canonicalize().map_err(|e| e.to_string())?);
+                }
+                crate::map_library::LaunchTarget::TestWorld => {
+                    if let Some(error) = saved_error {
+                        eprintln!("SAVED_MAP_SKIPPED {error}");
+                        config.startup_notice = Some(format!(
+                            "Saved map was not loaded.\n{error}\nStarting the test world. The saved map choice was left unchanged."
+                        ));
+                    }
+                }
             }
         }
         if config.validate_maps && (config.map.is_some() || config.check_assets) {

@@ -415,15 +415,17 @@ fn setup(
     });
     commands.insert_resource(SceneTarget(target));
     let selected_map = maps.iter().position(|m| m.path.as_ref() == config.map_path.as_ref()).unwrap_or(0);
-    if config.start_paused { time.pause(); }
+    let notice = config.startup_notice.clone().unwrap_or_default();
+    let hold = config.start_paused || !notice.is_empty();
+    if hold { time.pause(); }
     commands.insert_resource(Menu {
-        open: config.start_paused,
+        open: hold,
         selected: 1000,
         settings,
         path,
         difficulty: config.difficulty,
         custom, custom_defaults, custom_apply:false, custom_dirty:false,
-        status: String::new(),
+        status: notice,
         maps,
         selected_map,
         multiplayer: false,

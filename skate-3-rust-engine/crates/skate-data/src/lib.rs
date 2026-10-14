@@ -16,6 +16,7 @@ pub mod gesture_patterns;
 pub mod physics_skeleton;
 mod sha256;
 pub mod state_graph;
+pub mod load_budget;
 pub mod skate_map;
 pub mod retail_collision;
 pub mod xex;

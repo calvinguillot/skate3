@@ -53,7 +53,7 @@ BUILD.bat
 PLAY.bat
 ```
 
-The first build downloads the Rust dependencies and compiles them, so it needs a network connection and takes a while. `PLAY.bat` launches the game against the converted data in `skate3rust-windows-x64`.
+The first build downloads the Rust dependencies and compiles them, so it needs a network connection and takes a while. `PLAY.bat` launches the game against the converted data in `skate3rust-windows-x64`. `PLAY_SAFE.bat` starts on the retail Start Park map (`maps/StartPark.skate`) for that launch only and does not change the saved last map.
 
 Maloof Money Cup failed to convert during the original setup. The other nine disc maps are installed. Running the game's setup again retries that map.
 

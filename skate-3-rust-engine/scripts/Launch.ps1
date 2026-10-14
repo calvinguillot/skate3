@@ -1,4 +1,4 @@
-param([string]$Map, [switch]$Trace, [string]$TraceFile, [string]$Assets)
+param([string]$Map, [switch]$Trace, [string]$TraceFile, [string]$Assets, [switch]$StartPark)
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 $ErrorActionPreference = 'Stop'
 Push-Location $ProjectRoot
@@ -18,7 +18,21 @@ try {
     $argumentList = '--assets "' + $assetsPath + '"'
     if (-not $Map -and $env:SKATE_TRACE_MAP) { $Map = $env:SKATE_TRACE_MAP }
     if (-not $TraceFile -and $env:SKATE_TRACE_FILE) { $TraceFile = $env:SKATE_TRACE_FILE }
-    if ($Map) {
+    if ($StartPark -and $Map) { throw '-StartPark opens maps/StartPark.skate and cannot be combined with -Map.' }
+    if ($StartPark) {
+        # --map is the existing one-process override. It does not rewrite settings/default-map.json.
+        $installRoot = Split-Path $assetsPath -Parent
+        $startPark = Join-Path $installRoot 'maps/StartPark.skate'
+        if (-not (Test-Path -LiteralPath $startPark)) {
+            $startPark = Join-Path $installRoot 'maps/private/StartPark.skate'
+        }
+        if (-not (Test-Path -LiteralPath $startPark)) {
+            throw 'Start Park is not installed (maps/StartPark.skate).'
+        }
+        $argumentList += ' --map "' + $startPark + '"'
+        Write-Host "Map: $startPark"
+        Write-Host 'Saved last map left unchanged.'
+    } elseif ($Map) {
         $mapPath = (Resolve-Path -LiteralPath $Map).Path
         if ([System.IO.Path]::GetExtension($mapPath) -ine '.skate') { throw "Not a .skate map file: $mapPath" }
         $argumentList += ' --map "' + $mapPath + '"'

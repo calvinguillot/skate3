@@ -190,7 +190,7 @@ fn poll(mut imports: ResMut<MapImport>, mut menu: Option<ResMut<crate::graphics_
             menu.set_status(format!("{summary}\nSelect the map in the list to skate it."));
         }
         Err(error) if error == "cancelled" => menu.set_status("Import cancelled".into()),
-        Err(error) => menu.set_status(format!("Import failed: {error}")),
+        Err(error) => menu.set_status(format!("Import failed: {error}\nThe current map is still loaded.")),
     }
 }
 

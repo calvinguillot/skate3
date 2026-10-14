@@ -617,7 +617,7 @@ mod tests {
             asset_root: "unused".into(), verification_capture: None,
             map: None, map_path: None, difficulty: crate::difficulty::Difficulty::Hardcore,
             check_assets: false, validate_maps: false, start_paused: false, teleport: None, mute: false,
-            multiplayer: Default::default(), map_fingerprint: 0,
+            multiplayer: Default::default(), map_fingerprint: 0, startup_notice: None,
         });
         world.insert_resource(crate::retail_render::RetailScene(false));
         world.init_resource::<Assets<crate::customiser_material::SkaterMaterial>>();

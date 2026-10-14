@@ -356,6 +356,16 @@ impl StoredBlock<'_> {
 }
 impl SkateMap {
     pub fn load(path: &Path) -> Result<Self, String> {
+        // File length, then the header counts. Both are known before textures
+        // and geometry are decoded, which is the allocation that exhausts the GPU.
+        let file_bytes = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.len();
+        if let Some(reason) = crate::load_budget::reject_package_file(file_bytes) {
+            return Err(format!("{}: {reason}", path.display()));
+        }
+        let (vertices, triangles, collision) = geometry_counts(path)?;
+        if let Some(reason) = crate::load_budget::reject_package_shape(vertices, triangles, collision) {
+            return Err(format!("{}: {reason}", path.display()));
+        }
         let started = Instant::now();
         let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let disk = started.elapsed();
@@ -738,5 +748,141 @@ impl SkateMap {
             routes,
             extensions,
         })
+    }
+}
+
+/// Vertex, triangle and collision counts from the package header.
+///
+/// Reads at most 64 KB. Geometry and texture blocks stay on disk.
+fn geometry_counts(path: &Path) -> Result<(u64, u64, u64), String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut header = Vec::new();
+    file.by_ref()
+        .take(64 * 1024)
+        .read_to_end(&mut header)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    geometry_counts_from_header(&header).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn geometry_counts_from_header(bytes: &[u8]) -> Result<(u64, u64, u64), String> {
+    let mut cursor = Header { bytes, at: 0 };
+    let magic = cursor.take(8)?;
+    if &magic[..5] != b"SKATE"
+        || magic[7] != 0
+        || !magic[5].is_ascii_digit()
+        || !magic[6].is_ascii_digit()
+    {
+        return Err("Invalid SKATE magic/version".into());
+    }
+    let version = (magic[5] - b'0') * 10 + (magic[6] - b'0');
+    if !(1..=15).contains(&version) {
+        return Err("Unsupported SKATE version: reader supports 01 through 15; newer packages require an update".into());
+    }
+    if cursor.u32()? != 0x1234_5678 {
+        return Err("Invalid SKATE endian marker".into());
+    }
+    let name_len = cursor.u32()? as usize;
+    if name_len > 4096 {
+        return Err("SKATE map name is too long to inspect".into());
+    }
+    cursor.take(name_len)?;
+    cursor.take(16)?;
+    let environment = if version >= 6 {
+        45
+    } else if version >= 3 {
+        14
+    } else {
+        12
+    };
+    cursor.take(environment * 4)?;
+    let count_len = if version >= 8 {
+        9
+    } else if version >= 7 {
+        8
+    } else if version >= 4 {
+        7
+    } else {
+        6
+    };
+    let mut counts = [0u32; 9];
+    for count in &mut counts[..count_len] {
+        *count = cursor.u32()?;
+    }
+    let indices = u64::from(counts[3]);
+    Ok((u64::from(counts[2]), indices / 3, u64::from(counts[4])))
+}
+
+struct Header<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Header<'_> {
+    fn take(&mut self, n: usize) -> Result<&[u8], String> {
+        let end = self.at.checked_add(n).ok_or("Truncated SKATE header")?;
+        let slice = self.bytes.get(self.at..end).ok_or("Truncated SKATE header")?;
+        self.at = end;
+        Ok(slice)
+    }
+
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+}
+
+#[cfg(test)]
+mod budget_load_tests {
+    use super::*;
+
+    fn header(version: u8, name: &str, vertices: u32, indices: u32, collision: u32) -> Vec<u8> {
+        let mut out = format!("SKATE{version:02}\0").into_bytes();
+        out.extend_from_slice(&0x1234_5678u32.to_le_bytes());
+        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&[0u8; 16]);
+        let environment = if version >= 6 { 45 } else if version >= 3 { 14 } else { 12 };
+        out.extend_from_slice(&vec![0u8; environment * 4]);
+        let count_len = if version >= 8 { 9 } else if version >= 7 { 8 } else if version >= 4 { 7 } else { 6 };
+        let mut counts = [0u32; 9];
+        counts[2] = vertices;
+        counts[3] = indices;
+        counts[4] = collision;
+        for count in &counts[..count_len] {
+            out.extend_from_slice(&count.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn load_refuses_a_city_header_before_decoding_a_body() {
+        let dir = std::env::temp_dir().join(format!("skate-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let city = dir.join("city.skate");
+        std::fs::write(&city, header(9, "Helsinki", 10_972_270, 27_685_644, 9_228_550)).unwrap();
+        let error = SkateMap::load(&city).unwrap_err();
+        assert!(error.contains("10972270 vertices"), "{error}");
+        assert!(!error.contains("Truncated"), "{error}");
+        let downtown = dir.join("DownTown.skate");
+        std::fs::write(&downtown, header(14, "DownTown", 2_626_756, 5_666_682, 0)).unwrap();
+        let error = SkateMap::load(&downtown).unwrap_err();
+        assert!(!error.contains("limit") && !error.contains("vertices. The limit"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn installed_retail_headers_fit_and_the_city_package_is_not_read() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../skate3rust-windows-x64/data/installations");
+        let Ok(entries) = std::fs::read_dir(&root) else { return };
+        let Some(maps) = entries.flatten().map(|entry| entry.path().join("maps")).find(|path| path.join("StartPark.skate").is_file()) else {
+            return;
+        };
+        assert_eq!(super::geometry_counts(&maps.join("StartPark.skate")).unwrap(), (15_957, 13_176, 0));
+        assert_eq!(super::geometry_counts(&maps.join("DownTown.skate")).unwrap(), (2_626_756, 1_888_894, 0));
+        let started = std::time::Instant::now();
+        let error = SkateMap::load(&maps.join("helsinki_kallio_blend.skate")).unwrap_err();
+        assert!(started.elapsed().as_secs() < 3, "{:?}", started.elapsed());
+        assert!(error.contains("1120 MB"), "{error}");
+        assert!(error.contains("not read"), "{error}");
     }
 }
