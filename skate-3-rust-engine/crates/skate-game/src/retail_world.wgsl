@@ -287,6 +287,18 @@ fn fragment(i: VertexOutput) -> @location(0) vec4<f32> {
         }
         var lml = baked;
         lin = lml*kd*d;
+        // Bit 10 marks a portable (imported) material. Its 1x1 lightmap is a
+        // placeholder, so slope lighting comes from the live sun instead.
+        // shadow.xyz is that direction only while shadow.w stays 0 (no cascades).
+        if (flags & 1024u) != 0u {
+            let live = frame_state.shadow.xyz;
+            let sun_dir = normalize(select(vec3<f32>(0.25, 0.93, 0.25), live, dot(live, live) > 0.25));
+            let ndotl = saturate(dot(wn, sun_dir));
+            let lit = frame_state.clock.w > 0.05;
+            let ambient = select(0.45, clamp(frame_state.pca[0].w, 0.0, 1.0), lit);
+            let bright = select(1.0, frame_state.clock.w, lit);
+            lin = d * (ambient + (1.0 - ambient) * ndotl) * bright;
+        }
         // transparentenvironment_defaultPS 39, 43: diffuse^2 * lightmap * alpha, no kd.
         if fam == 13u || fam == 16u { lin = lml*d*a.a; }
         if (flags & 16u) != 0u {

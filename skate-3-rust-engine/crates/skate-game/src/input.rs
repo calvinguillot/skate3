@@ -125,7 +125,7 @@ pub(crate) fn poll_controllers(mut input: ResMut<ControllerInput>,config:Res<cra
         } else {platform::poll_cached(slot, &mut capabilities[slot])}
     });
     // A keyboard stands in for a missing pad, and adds to a pad that is already there.
-    if focused {
+    if focused && pad.enabled {
         let keyboard = pad.xbox_state(&keys, &mouse);
         let slot = samples.iter().position(|sample| sample.is_ok()).unwrap_or(0);
         match &mut samples[slot] {

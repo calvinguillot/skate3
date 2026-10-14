@@ -38,6 +38,13 @@ pub(crate) struct SessionMarker {
     modifier: bool,
 }
 
+impl SessionMarker {
+    /// World position of a marker the player has placed, if one is active.
+    pub(crate) fn placed_position(&self) -> Option<[f32; 3]> {
+        self.marker.map(|marker| [marker.transform[3][0], marker.transform[3][1], marker.transform[3][2]])
+    }
+}
+
 pub(crate) struct SessionMarkerPlugin;
 impl Plugin for SessionMarkerPlugin {
     fn build(&self, app: &mut App) {

@@ -59,9 +59,14 @@ fn defaults() -> Vec<Binding> {
     ]
 }
 
+fn default_enabled() -> bool { true }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct KeyboardFile {
+    /// Gameplay keys and mouse. Menu keys stay available when this is off.
+    #[serde(default = "default_enabled")]
+    enabled: bool,
     mouse: bool,
     invert_y: bool,
     sensitivity: f32,
@@ -71,6 +76,7 @@ struct KeyboardFile {
 impl Default for KeyboardFile {
     fn default() -> Self {
         Self {
+            enabled: true,
             mouse: true,
             invert_y: false,
             sensitivity: 0.015,
@@ -124,6 +130,7 @@ fn parse_source(name: &str) -> Option<Source> {
 
 #[derive(Resource, Clone, Debug)]
 pub(crate) struct VirtualPad {
+    pub enabled: bool,
     pub mouse: bool,
     pub invert_y: bool,
     pub sensitivity: f32,
@@ -153,6 +160,7 @@ impl VirtualPad {
             }
         }
         Self {
+            enabled: file.enabled,
             mouse: file.mouse,
             invert_y: file.invert_y,
             sensitivity: file.sensitivity.clamp(SENSITIVITY_MIN, SENSITIVITY_MAX),
@@ -187,6 +195,7 @@ impl VirtualPad {
             return Err("Keyboard settings have no save path".into());
         }
         let file = KeyboardFile {
+            enabled: self.enabled,
             mouse: self.mouse,
             invert_y: self.invert_y,
             sensitivity: self.sensitivity,
@@ -203,6 +212,10 @@ impl VirtualPad {
 
     pub(crate) fn adjust(&mut self, row: usize, direction: i32, coarse: bool) -> String {
         match row {
+            62 => {
+                self.enabled = !self.enabled;
+                format!("Keyboard and mouse {}", if self.enabled { "on" } else { "off" })
+            }
             4 => {
                 let step = if coarse { 0.01 } else { 0.001 };
                 self.sensitivity = (self.sensitivity + direction as f32 * step).clamp(SENSITIVITY_MIN, SENSITIVITY_MAX);
@@ -222,6 +235,7 @@ impl VirtualPad {
 
     pub(crate) fn label(&self, row: usize) -> String {
         match row {
+            62 => format!("Keyboard & mouse      {}", if self.enabled { "On" } else { "Off" }),
             4 => format!("Mouse sensitivity    {:.3}", self.sensitivity),
             9 => format!("Invert vertical       {}", if self.invert_y { "On" } else { "Off" }),
             15 => format!("Mouse tricks          {}", if self.mouse { "On" } else { "Off" }),
@@ -263,6 +277,9 @@ impl VirtualPad {
     }
 
     pub(crate) fn xbox_state(&self, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> XboxState {
+        if !self.enabled {
+            return XboxState { buttons: 0, triggers: [0, 0], left: [0, 0], right: [0, 0] };
+        }
         let mut buttons = 0u16;
         let mut set = |action: &str, name: &str| {
             if self.down(action, keys, mouse) {
@@ -339,7 +356,7 @@ pub(crate) fn accumulate_mouse(
     menu: Option<Res<crate::graphics_menu::Menu>>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
-    if !pad.mouse || !gameplay_active(menu) || !windows.iter().any(|window| window.focused) {
+    if !pad.enabled || !pad.mouse || !gameplay_active(menu) || !windows.iter().any(|window| window.focused) {
         return;
     }
     pad.mouse_pending += motion.delta;
@@ -352,7 +369,7 @@ pub(crate) fn step_stick(
     menu: Option<Res<crate::graphics_menu::Menu>>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
-    let playing = gameplay_active(menu) && windows.iter().any(|window| window.focused);
+    let playing = pad.enabled && gameplay_active(menu) && windows.iter().any(|window| window.focused);
     if !playing {
         pad.right = [0.0, 0.0];
         pad.mouse_pending = Vec2::ZERO;
@@ -369,7 +386,7 @@ pub(crate) fn capture_cursor(
     mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
     let Ok((window, mut cursor)) = windows.single_mut() else { return };
-    let capture = pad.mouse && gameplay_active(menu) && window.focused;
+    let capture = pad.enabled && pad.mouse && gameplay_active(menu) && window.focused;
     cursor.grab_mode = if capture { CursorGrabMode::Locked } else { CursorGrabMode::None };
     cursor.visible = !capture;
 }
@@ -413,6 +430,15 @@ mod tests {
             names.iter().any(|name| name == "Ollie"),
             "expected Ollie, got {names:?}"
         );
+    }
+
+    #[test]
+    fn saved_settings_without_enabled_stay_on() {
+        let file: KeyboardFile = serde_json::from_str(r#"{"mouse":true,"invert_y":false,"sensitivity":0.015,"bindings":{}}"#).unwrap();
+        assert!(file.enabled);
+        let pad = VirtualPad::from_file(file, PathBuf::new());
+        assert!(pad.enabled);
+        assert!(pad.xbox_state(&ButtonInput::default(), &ButtonInput::default()).buttons == 0);
     }
 
     fn installed_assets() -> Option<std::path::PathBuf> {

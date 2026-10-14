@@ -999,7 +999,7 @@ impl Request {
         let macro_scale = definition.scalar("macroOverlayUVScale").unwrap_or(0.);
         let macro_opacity = definition.scalar("macroOverlayOpacity").unwrap_or(0.);
         let detail_scale = definition.scalar("detailNormalUVScale").unwrap_or(0.);
-        let flags = u32::from(normal.is_some())
+        let mut flags = u32::from(normal.is_some())
             | (u32::from(detail.is_some() && detail_scale > 0.) << 1)
             | (u32::from(
                 macro_map.is_some()
@@ -1011,6 +1011,11 @@ impl Request {
             | (u32::from(lightmap.is_some()) << 5)
             | (u32::from(environment.is_some()) << 6)
             | (u32::from(detail.is_some()) << 7);
+        // Free bit: portable materials have no baked sun, so the shader
+        // applies a live Lambert term instead of the placeholder lightmap.
+        if material.retail_definition.is_none() {
+            flags |= 1 << 10;
+        }
 
         let blended = material.alpha_mode == 2
             || definition.family == 32
@@ -1217,12 +1222,22 @@ impl Slab {
         let mut levels = 1;
         for &id in &page.layers {
             let texture = &map.textures[id as usize - 1];
+            // Imported maps ship a 1x1 Indirect texel of 64, which the shader
+            // squares down to about 6% brightness. Lift that placeholder so
+            // older files match new imports without a reimport. Portable
+            // materials also ignore it via flag bit 10.
+            let boosted = (texture.width == 1
+                && texture.height == 1
+                && texture.name == "Indirect"
+                && texture.rgba == [64, 64, 64, 255])
+                .then(|| vec![210, 210, 210, 255]);
+            let source = boosted.as_deref().unwrap_or(texture.rgba.as_slice());
             let owned;
             let rgba = if texture.width == page.width && texture.height == page.height {
-                &texture.rgba
+                source
             } else {
                 owned = resample(
-                    &texture.rgba,
+                    source,
                     texture.width,
                     texture.height,
                     page.width,
@@ -1404,6 +1419,9 @@ fn initialize_frame_state(mut buffers: ResMut<Assets<ShaderStorageBuffer>>) {
     }
 }
 
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct AdvanceFrameState;
+
 /// Advances the animation clock and ocean PCA frame. `shadow` stays zero while
 /// shadows are out of scope (RFC 1 D5), which keeps the shader off the cascade
 /// bindings entirely.
@@ -1501,7 +1519,7 @@ impl Plugin for RetailRenderPlugin {
             ))
             .add_plugins(ExtractResourcePlugin::<FrameStateData>::default())
             .add_systems(Startup, (initialize_frame_state, load_pca))
-            .add_systems(Update, advance_frame_state);
+            .add_systems(Update, advance_frame_state.in_set(AdvanceFrameState));
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.add_systems(
                 Render,

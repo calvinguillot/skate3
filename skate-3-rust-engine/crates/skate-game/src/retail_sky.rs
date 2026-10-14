@@ -16,6 +16,41 @@ use bevy::{
 };
 
 use crate::map_render::{AssetSink, SceneCommands};
+use std::path::Path;
+
+/// Marks a sky dome spawned for a map that has no authored sky of its own.
+/// Retail domes do not carry this, so a preset change never removes them.
+#[derive(Component)]
+pub(crate) struct ImportedSky {
+    pub multiplier: f32,
+}
+
+/// Sky packages installed next to the converted game (`private/native-skies`).
+pub(crate) fn available(asset_root: &Path) -> Vec<String> {
+    let dir = asset_root.join("private/native-skies");
+    let mut names = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else { return names };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
+        let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else { continue };
+        if name.is_empty() || name.contains(['/', '\\', ':', '.']) { continue; }
+        if dir.join(format!("{name}.rgba")).is_file() {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    names
+}
+
+pub(crate) fn cycle_preset(current: &str, names: &[String], direction: i32) -> String {
+    let mut options = vec!["Off".to_string()];
+    options.extend(names.iter().cloned());
+    if options.len() == 1 { return "Off".into(); }
+    let index = options.iter().position(|name| name == current).unwrap_or(0);
+    let next = (index as i32 + direction).rem_euclid(options.len() as i32) as usize;
+    options[next].clone()
+}
 
 /// What the world shader needs from the sky package.
 ///
@@ -225,6 +260,7 @@ impl SkyPackage {
         meshes: &mut impl AssetSink<Mesh>,
         images: &mut impl AssetSink<Image>,
         materials: &mut impl AssetSink<SkyMaterial>,
+        imported: bool,
     ) {
         // Legacy sky packages retain their original parameters. The scene
         // exposure is the baseline the tone pass divides back out.
@@ -261,7 +297,8 @@ impl SkyPackage {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.sky.positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.sky.uvs)
         .with_inserted_indices(bevy::mesh::Indices::U32(self.sky.indices));
-        commands.spawn((
+        let multiplier = params.settings.z;
+        let bundle = (
             Name::new("Retail sky dome"),
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(materials.add(SkyMaterial {
@@ -275,7 +312,12 @@ impl SkyPackage {
             bevy::camera::visibility::NoFrustumCulling,
             bevy::light::NotShadowCaster,
             bevy::light::NotShadowReceiver,
-        ));
+        );
+        if imported {
+            commands.spawn_marked(bundle, ImportedSky { multiplier });
+        } else {
+            commands.spawn(bundle);
+        }
     }
 }
 

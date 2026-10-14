@@ -78,15 +78,23 @@ The game plays with a keyboard and mouse. A connected gamepad still works, and t
 
 Trick flicks need a short movement rather than a tap. Pull the mouse down and back up for an ollie. The arrow keys move the stick gradually so the same gesture works from the keyboard.
 
-Escape opens the menu. Its CONTROLS page sets the mouse sensitivity, inverts the vertical axis, and turns mouse control on or off. The choices are saved in `settings/keyboard.json` next to the game's other settings, under the converted installation, and you can edit that file directly.
+Escape opens the menu. Its CONTROLS page can turn keyboard and mouse gameplay off when you are using a controller. Menu keys (Escape, the arrows, Enter and clicks) keep working. The same page sets the mouse sensitivity, inverts the vertical axis, and turns mouse tricks on or off. The choices are saved in `settings/keyboard.json` next to the game's other settings, under the converted installation, and you can edit that file directly. An older file that has no `enabled` field stays on.
 
-The mouse pointer is hidden and locked to the window while you skate, and it comes back while the menu is open.
+The mouse pointer is hidden and locked to the window while you skate with keyboard and mouse enabled, and it comes back while the menu is open or while keyboard and mouse gameplay is off.
+
+## Sky, lighting and the minimap
+
+Imported maps have no authored sky or lightmaps. GRAPHICS > Sky & lighting (also linked from MAPS) picks an installed skybox — University, DownTown, MegaPark and the other packages under `assets/private/native-skies` — or Off. World brightness, ambient fill and the sun time update the imported map immediately. Retail maps keep their baked lighting. Cycle speed moves the sun while you skate; set it to Frozen to hold the time of day. The choices are saved in `settings/graphics.json`.
+
+A minimap sits in the top-right while you skate. GRAPHICS > Minimap turns it off. It hides while the pause menu is open. The marker points the way the skater is facing, a second marker is the map spawn, and an orange marker is a session marker if you have placed one.
+
+MAPS > Place on map / choose spawn... opens a top-down view of the current map. Left click, or Enter, teleports you there and resumes. Right click, or Save as map default spawn, does the same and stores that spot. The next load of the map starts there. Portable `.skate` files are rewritten; retail map files are left alone and the spot is kept in `settings/map-spawns.json`. Escape or Back returns to the pause menu.
 
 ## Importing an FBX map
 
 `fbx/laru_LOD_40cm_scale_1.fbx` is one mesh of 749,105 vertices and 496,302 triangles, with 501 materials and an embedded PNG on each. It was exported from Blender 4.1.1 in centimetres with an object scale of 100, so its vertex values are metres. At scale 1.0 the map is about 3.04 km by 3.22 km, with 66.5 m between its lowest and highest points. The triangles are large for skating, so buildings and ground will feel coarse. A scale of 0.1 makes it about 304 m by 322 m.
 
-The importer is the `skate-map-import` library in the engine. `import_file` reads a binary FBX and writes a portable SKATE09 `.skate` file (zlib-compressed texture and geometry blocks) plus `<name>.import.json`, so the same options can be reused. It parses the package back and runs the portable runtime checks before anything is written. The game flag `--import-map`, the in-game import page, and dropping an FBX on the window are not wired up yet; they should call `import_file` and pass the installation `maps` folder.
+The importer is the `skate-map-import` library in the engine. `import_file` reads a binary FBX and writes a portable SKATE09 `.skate` file (zlib-compressed texture and geometry blocks) plus `<name>.import.json`, so the same options can be reused. It parses the package back and runs the portable runtime checks before anything is written. From the game, MAPS > Import FBX map... opens a file dialog, and dropping an FBX on the window imports it too. `--import-map` does the same from the command line. The file is written to the installation `maps` folder. MAPS also sets the import scale; Shift plus Left or Right changes it by 0.1.
 
 `ImportOptions` is the public control surface:
 

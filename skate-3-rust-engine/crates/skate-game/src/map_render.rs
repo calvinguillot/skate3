@@ -99,6 +99,23 @@ impl SceneCommands {
             world.spawn((bundle, MapEntity));
         });
     }
+
+    pub(crate) fn spawn_marked<B: Bundle, M: Component>(&mut self, bundle: B, marker: M) {
+        self.queue.push(move |world: &mut World| {
+            world.spawn((bundle, MapEntity, marker));
+        });
+    }
+
+    pub(crate) fn apply(mut self, world: &mut World) {
+        self.queue.apply(world);
+    }
+}
+
+struct LiveAssets<'a, A: Asset>(&'a mut Assets<A>);
+impl<A: Asset> AssetSink<A> for LiveAssets<'_, A> {
+    fn add(&mut self, asset: A) -> Handle<A> {
+        self.0.add(asset)
+    }
 }
 
 /// Assets owned by the live scene, released on the next map change.
@@ -190,6 +207,7 @@ impl PreparedScene {
                 &mut self.meshes,
                 &mut self.images,
                 &mut self.sky,
+                false,
             );
         }
     }
@@ -264,4 +282,163 @@ pub(crate) fn position_celestial_bodies(
         transform.translation = direction * 400.0;
         *visibility = if direction.y > -0.05 { Visibility::Inherited } else { Visibility::Hidden };
     }
+}
+
+/// Sun direction for a 24-hour clock. Noon is mostly upward; midnight points down.
+pub(crate) fn sun_direction(hour: f32) -> Vec3 {
+    let angle = (hour / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+    Vec3::new(angle.cos(), angle.sin(), 0.25).normalize()
+}
+
+/// Directional light spawned for maps that are not lightmap-baked.
+#[derive(Component)]
+pub(crate) struct ImportedSun;
+
+/// Which preset the live imported dome was built from. `Off` and empty are distinct:
+/// empty means "retail map, no imported dome".
+#[derive(Resource)]
+struct ActiveImportedSky {
+    name: String,
+    /// The package failed to load. Don't try again until the preset changes.
+    missing: bool,
+}
+
+/// Portable materials read these channels from the frame the retail shader already uploads.
+/// Retail maps leave the buffer alone so baked lightmaps and ocean PCA stay intact.
+pub(crate) fn apply_imported_light(
+    retail: Res<crate::retail_render::RetailScene>,
+    mut state: ResMut<crate::retail_render::FrameStateData>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    mut menu: Option<ResMut<crate::graphics_menu::Menu>>,
+    time: Res<Time<Virtual>>,
+    mut commands: Commands,
+    mut suns: Query<(Entity, &mut DirectionalLight, &mut Transform), With<ImportedSun>>,
+    skies: Query<(&crate::retail_sky::ImportedSky, &MeshMaterial3d<crate::retail_sky::SkyMaterial>)>,
+    mut materials: ResMut<Assets<crate::retail_sky::SkyMaterial>>,
+    mut restored: Local<bool>,
+) {
+    if retail.0 {
+        for (entity, _, _) in suns.iter() {
+            commands.entity(entity).despawn();
+        }
+        if *restored {
+            ambient.brightness = 350.;
+            ambient.color = Color::WHITE;
+            *restored = false;
+        }
+        return;
+    }
+    let (hour, brightness, fill) = if let Some(menu) = menu.as_deref_mut() {
+        let hour = menu.advance_day(time.delta_secs());
+        (hour, menu.world_brightness(), menu.ambient_fill(sun_direction(hour).y))
+    } else {
+        (12., 1., 0.45)
+    };
+    let sun = sun_direction(hour);
+    state.shadow = Vec4::new(sun.x, sun.y, sun.z, 0.);
+    state.clock.w = brightness;
+    state.pca[0].w = fill;
+    ambient.color = Color::WHITE;
+    ambient.brightness = (80. + 420. * fill) * brightness;
+    *restored = true;
+    if suns.is_empty() {
+        commands.spawn((
+            ImportedSun,
+            DirectionalLight {
+                illuminance: 11_000.,
+                shadows_enabled: true,
+                ..default()
+            },
+            Transform::default(),
+        ));
+    }
+    let up = if sun.y.abs() > 0.95 { Vec3::Z } else { Vec3::Y };
+    let aim = Transform::default().looking_to(-sun, up);
+    let illuminance = 11_000. * brightness * sun.y.max(0.).powf(0.4);
+    for (_, mut light, mut transform) in &mut suns {
+        light.illuminance = illuminance;
+        light.shadows_enabled = true;
+        *transform = aim;
+    }
+    let sun4 = sun.extend(0.);
+    for (sky, handle) in &skies {
+        let Some(material) = materials.get_mut(&handle.0) else { continue };
+        let multiplier = sky.multiplier * brightness;
+        if (material.params.settings.z - multiplier).abs() > 0.001
+            || material.params.sun_direction.distance(sun4) > 0.001
+        {
+            material.params.settings.z = multiplier;
+            material.params.sun_direction = sun4;
+        }
+    }
+}
+
+/// Swap the imported sky dome when the preset changes. Retail skies are spawned
+/// with the map and are not touched here. Runs after map retirement, so a dome
+/// spawned this frame is not deleted by the same transition.
+pub(crate) fn sync_imported_sky(world: &mut World) {
+    let retail = world.resource::<crate::retail_render::RetailScene>().0;
+    let want = world
+        .get_resource::<crate::graphics_menu::Menu>()
+        .map(|menu| menu.sky_preset().to_string())
+        .unwrap_or_else(|| "University".into());
+    let current = world.get_resource::<ActiveImportedSky>().map(|sky| (sky.name.clone(), sky.missing));
+    let mut query = world.query::<(Entity, &crate::retail_sky::ImportedSky)>();
+    let present: Vec<Entity> = query.iter(world).map(|(entity, _)| entity).collect();
+    if retail {
+        if present.is_empty() && current.as_ref().is_some_and(|(name, _)| name.is_empty()) {
+            return;
+        }
+        for entity in present {
+            world.despawn(entity);
+        }
+        world.insert_resource(ActiveImportedSky { name: String::new(), missing: false });
+        return;
+    }
+    let settled = current.as_ref().is_some_and(|(name, missing)| {
+        name == &want && (*missing || want == "Off" || !present.is_empty())
+    });
+    if settled {
+        return;
+    }
+    for entity in present {
+        world.despawn(entity);
+    }
+    let mut missing = false;
+    if want != "Off" {
+        let root = world.resource::<crate::config::Config>().asset_root.clone();
+        match crate::retail_sky::SkyPackage::load(&root, &want) {
+            Ok(package) => spawn_imported_sky(world, package),
+            Err(error) => {
+                warn!("Sky preset {want} unavailable: {error}");
+                missing = true;
+            }
+        }
+    }
+    world.insert_resource(ActiveImportedSky { name: want, missing });
+}
+
+fn spawn_imported_sky(world: &mut World, package: crate::retail_sky::SkyPackage) {
+    let Some(mut meshes) = world.remove_resource::<Assets<Mesh>>() else { return };
+    let Some(mut images) = world.remove_resource::<Assets<Image>>() else {
+        world.insert_resource(meshes);
+        return;
+    };
+    let Some(mut materials) = world.remove_resource::<Assets<crate::retail_sky::SkyMaterial>>() else {
+        world.insert_resource(meshes);
+        world.insert_resource(images);
+        return;
+    };
+    let mut commands = SceneCommands::default();
+    package.spawn(
+        &mut commands,
+        &mut LiveAssets(&mut meshes),
+        &mut LiveAssets(&mut images),
+        &mut LiveAssets(&mut materials),
+        true,
+    );
+    world.insert_resource(meshes);
+    world.insert_resource(images);
+    world.insert_resource(materials);
+    commands.apply(world);
 }

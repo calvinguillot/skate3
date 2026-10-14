@@ -21,6 +21,7 @@ mod setup;
 mod updater;
 mod map_library;
 mod map_import;
+mod minimap;
 mod map_render;
 mod map_transition;
 mod difficulty;
@@ -82,7 +83,7 @@ fn main() -> bevy::app::AppExit {
     };
     let _startup = bevy::log::info_span!("startup").entered();
     eprintln!("REPORT_META stage=configuration_and_installation");
-    let config = match bevy::log::info_span!("load_configuration_and_map").in_scope(config::Config::from_env) {
+    let mut config = match bevy::log::info_span!("load_configuration_and_map").in_scope(config::Config::from_env) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("{error}");
@@ -122,6 +123,11 @@ fn main() -> bevy::app::AppExit {
         };
     }
     eprintln!("REPORT_META stage=map_validation");
+    if let (Some(map), Some(path)) = (&mut config.map, config.map_path.as_deref()) {
+        if let Some(spawn) = minimap::saved_spawn(&config.asset_root, path) {
+            map.spawn = spawn;
+        }
+    }
     if let Some(map) = &config.map {
         if let Err(error) = skate_world::validate_runtime(map) {
             eprintln!("{error}");

@@ -189,7 +189,7 @@ pub(crate) fn convert_scene(scene: Scene, options: &ImportOptions) -> Result<(Sk
     }
     let indirect = textures.len() as u32 + 1;
     textures.push(Texture {
-        name: "Indirect".into(), width: 1, height: 1, color_space: 0, rgba: vec![64, 64, 64, 255],
+        name: "Indirect".into(), width: 1, height: 1, color_space: 0, rgba: vec![210, 210, 210, 255],
     });
     for material in &mut materials {
         material.textures[1] = indirect;
