@@ -2,7 +2,6 @@
 //! The right stick eases toward key targets so a down-then-up tap is a flick
 //! the gesture recognizer can see, instead of a one-sample jump.
 use super::platform::{DevicePacket, BUTTON_NAMES};
-use crate::graphics_menu::gameplay_active;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -59,7 +58,42 @@ fn defaults() -> Vec<Binding> {
     ]
 }
 
-fn default_enabled() -> bool { true }
+fn default_enabled() -> bool { false }
+
+/// Gameplay keys and mouse. Menu keys stay on Bevy input either way.
+pub(crate) fn gameplay_allowed(enabled: bool, focused: bool, interface_open: bool) -> bool {
+    enabled && focused && !interface_open
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct PlayGate {
+    pub active: bool,
+}
+
+pub(crate) fn update_gate(
+    mut pad: ResMut<VirtualPad>,
+    mut gate: ResMut<PlayGate>,
+    menu: Option<Res<crate::graphics_menu::Menu>>,
+    customiser: Option<Res<crate::customiser::Customiser>>,
+    models: Option<Res<crate::custom_models::CustomModels>>,
+    travel: Option<Res<crate::teleport_menu::Travel>>,
+    mods: Option<Res<crate::modding::ModMenu>>,
+    replay: Option<Res<crate::replay::Replay>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    let interface = menu.as_ref().is_some_and(|menu| menu.open || menu.place_on_map())
+        || customiser.as_ref().is_some_and(|ui| ui.open)
+        || models.as_ref().is_some_and(|ui| ui.open)
+        || travel.as_ref().is_some_and(|ui| ui.open)
+        || mods.as_ref().is_some_and(|ui| ui.open)
+        || replay.as_ref().is_some_and(|replay| replay.active);
+    let focused = windows.iter().any(|window| window.focused);
+    gate.active = gameplay_allowed(pad.enabled, focused, interface);
+    if !gate.active {
+        pad.right = [0.0, 0.0];
+        pad.mouse_pending = Vec2::ZERO;
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -76,7 +110,7 @@ struct KeyboardFile {
 impl Default for KeyboardFile {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             mouse: true,
             invert_y: false,
             sensitivity: 0.015,
@@ -353,10 +387,9 @@ pub(crate) fn keyboard_packet(state: XboxState) -> DevicePacket {
 pub(crate) fn accumulate_mouse(
     motion: Res<AccumulatedMouseMotion>,
     mut pad: ResMut<VirtualPad>,
-    menu: Option<Res<crate::graphics_menu::Menu>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    gate: Res<PlayGate>,
 ) {
-    if !pad.enabled || !pad.mouse || !gameplay_active(menu) || !windows.iter().any(|window| window.focused) {
+    if !gate.active || !pad.mouse {
         return;
     }
     pad.mouse_pending += motion.delta;
@@ -366,10 +399,9 @@ pub(crate) fn step_stick(
     mut pad: ResMut<VirtualPad>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    menu: Option<Res<crate::graphics_menu::Menu>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    gate: Res<PlayGate>,
 ) {
-    let playing = pad.enabled && gameplay_active(menu) && windows.iter().any(|window| window.focused);
+    let playing = gate.active;
     if !playing {
         pad.right = [0.0, 0.0];
         pad.mouse_pending = Vec2::ZERO;
@@ -382,11 +414,11 @@ pub(crate) fn step_stick(
 
 pub(crate) fn capture_cursor(
     pad: Res<VirtualPad>,
-    menu: Option<Res<crate::graphics_menu::Menu>>,
+    gate: Res<PlayGate>,
     mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
     let Ok((window, mut cursor)) = windows.single_mut() else { return };
-    let capture = pad.enabled && pad.mouse && gameplay_active(menu) && window.focused;
+    let capture = gate.active && pad.mouse && window.focused;
     cursor.grab_mode = if capture { CursorGrabMode::Locked } else { CursorGrabMode::None };
     cursor.visible = !capture;
 }
@@ -433,11 +465,13 @@ mod tests {
     }
 
     #[test]
-    fn saved_settings_without_enabled_stay_on() {
+    fn saved_settings_without_enabled_stay_off() {
         let file: KeyboardFile = serde_json::from_str(r#"{"mouse":true,"invert_y":false,"sensitivity":0.015,"bindings":{}}"#).unwrap();
-        assert!(file.enabled);
+        assert!(!file.enabled);
         let pad = VirtualPad::from_file(file, PathBuf::new());
-        assert!(pad.enabled);
+        assert!(!pad.enabled);
+        assert!(!gameplay_allowed(pad.enabled, true, false));
+        assert!(!gameplay_allowed(true, true, true));
         assert!(pad.xbox_state(&ButtonInput::default(), &ButtonInput::default()).buttons == 0);
     }
 

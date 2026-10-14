@@ -274,21 +274,19 @@ impl GamePhysics {
             "SKATE_PHYSICS_MODE {} index={}",
             difficulty.key(), animation_profile.physics_mode
         );
+        let world = match map {
+            Some(map) => crate::skate_world::collision_world(map, settings.floor_material)?,
+            None => terrain.world(settings.floor_material),
+        };
+        let ride = settings.wheel_radius - settings.authored[0].translation.y;
         let mut spawn = RetailAffineTransform {
-            translation: Vector3::new(
-                0.0,
-                ground::HEIGHT + settings.wheel_radius - settings.authored[0].translation.y,
-                0.0,
-            ),
+            translation: Vector3::new(0.0, ground::HEIGHT + ride, 0.0),
             ..RetailAffineTransform::IDENTITY
         };
         if let Some(map) = map {
-            // Package spawn is the wheel-ground anchor, in native Y-up metres.
-            spawn.translation = Vector3::new(
-                map.spawn[0],
-                map.spawn[1] + settings.wheel_radius - settings.authored[0].translation.y,
-                map.spawn[2],
-            );
+            // Package spawn is the wheel-ground anchor. Lift it when that point is under the loaded surface.
+            let contact = crate::minimap::contact_height(&world, map.spawn[0], map.spawn[2], map.spawn[1]);
+            spawn.translation = Vector3::new(map.spawn[0], contact + ride, map.spawn[2]);
             spawn.basis = skate_core::math::Basis3 {
                 columns: Mat3::from_rotation_y(map.heading).to_cols_array_2d(),
             };
@@ -300,10 +298,6 @@ impl GamePhysics {
             settings.step.simulation,
             BoardMotion::Active,
         );
-        let world = match map {
-            Some(map) => crate::skate_world::collision_world(map, settings.floor_material)?,
-            None => terrain.world(settings.floor_material),
-        };
         let grind_world = std::sync::Arc::new(if map.is_none() && terrain == ground::Terrain::Course {
             crate::grind_world::StaticProvider::authored(&crate::grind_world::test_rails())?
         } else { crate::grind_world::StaticProvider::new(map)? });

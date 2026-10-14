@@ -410,22 +410,48 @@ fn catch_floor(min: [f32; 3], max: [f32; 3], surface: u32) -> Vec<Collision> {
 }
 
 fn find_spawn(collision: &[Collision]) -> Option<[f32; 3]> {
-    let mut best: Option<[f32; 3]> = None;
-    for radius in [0.0, 2.0, 8.0, 32.0, 128.0] {
+    for radius in [0.0, 2.0, 8.0, 32.0, 128.0, 512.0, 2048.0, 8192.0] {
         for step in 0..8 {
             let angle = step as f32 / 8.0 * std::f32::consts::TAU;
             let (x, z) = if radius == 0.0 { (0.0, 0.0) } else { (angle.cos() * radius, angle.sin() * radius) };
+            let mut heights = Vec::new();
             for triangle in collision {
                 if triangle.points.iter().all(|point| point[1] < -0.1) { continue; }
-                let Some(y) = ground_y(triangle.points, x, z) else { continue };
-                if best.is_none_or(|spawn| y > spawn[1]) {
-                    best = Some([x, y, z]);
+                if let Some(y) = ground_y(triangle.points, x, z) {
+                    heights.push(y);
                 }
             }
+            if let Some(y) = lowest_open(&heights) {
+                return Some([x, y, z]);
+            }
         }
-        if best.is_some() { break; }
     }
-    best
+    let mut nearest: Option<(f32, f32, f32)> = None;
+    for triangle in collision {
+        if triangle.points.iter().all(|point| point[1] < -0.1) { continue; }
+        let x = triangle.points.iter().map(|point| point[0]).sum::<f32>() / 3.0;
+        let z = triangle.points.iter().map(|point| point[2]).sum::<f32>() / 3.0;
+        if ground_y(triangle.points, x, z).is_none() { continue; }
+        let distance = x * x + z * z;
+        if nearest.is_none_or(|(best, _, _)| distance < best) {
+            nearest = Some((distance, x, z));
+        }
+    }
+    let (_, x, z) = nearest?;
+    let heights: Vec<f32> = collision.iter().filter_map(|triangle| {
+        if triangle.points.iter().all(|point| point[1] < -0.1) { return None; }
+        ground_y(triangle.points, x, z)
+    }).collect();
+    lowest_open(&heights).map(|y| [x, y, z])
+}
+
+/// Lowest upward hit with two metres of clearance. The catch floor is ignored while real ground exists.
+fn lowest_open(heights: &[f32]) -> Option<f32> {
+    let raised: Vec<f32> = heights.iter().copied().filter(|y| *y >= -0.1).collect();
+    let set = if raised.is_empty() { heights } else { raised.as_slice() };
+    set.iter().copied().filter(|y| {
+        !set.iter().any(|other| *other > *y + 0.05 && *other < *y + 2.0)
+    }).reduce(f32::min)
 }
 
 fn ground_y(points: [[f32; 3]; 3], x: f32, z: f32) -> Option<f32> {
@@ -438,7 +464,7 @@ fn ground_y(points: [[f32; 3]; 3], x: f32, z: f32) -> Option<f32> {
         if length < 1e-8 { return None; }
         cross[1] / length
     };
-    if up < 0.85 { return None; }
+    if up < 0.35 { return None; }
     let (abx, abz) = (b[0] - a[0], b[2] - a[2]);
     let (acx, acz) = (c[0] - a[0], c[2] - a[2]);
     let det = abx * acz - abz * acx;
@@ -527,6 +553,23 @@ mod tests {
         assert_eq!(map.geometry.collision.len(), 3);
         assert!((report.width_m - 2.0).abs() < 0.001, "{}", report.width_m);
         assert!(map.spawn[1].abs() < 0.001, "spawn should sit on the mesh, got {}", map.spawn[1]);
+        let floor = Collision {
+            points: [[-4.0, 0.0, -4.0], [0.0, 0.0, 4.0], [4.0, 0.0, -4.0]],
+            surface: 1, material: 1, native_edges: None,
+        };
+        let roof = Collision {
+            points: [[-4.0, 30.0, -4.0], [0.0, 30.0, 4.0], [4.0, 30.0, -4.0]],
+            surface: 1, material: 1, native_edges: None,
+        };
+        let chosen = find_spawn(&[roof, floor]).unwrap();
+        assert!(chosen[1].abs() < 0.05, "{chosen:?}");
+        let far = Collision {
+            points: [[1990.0, 12.0, -4.0], [2000.0, 12.0, 4.0], [2010.0, 12.0, -4.0]],
+            surface: 1, material: 1, native_edges: None,
+        };
+        let distant = find_spawn(&[far]).unwrap();
+        assert!((distant[0] - 2000.0).abs() < 1.0, "{distant:?}");
+        assert!((distant[1] - 12.0).abs() < 0.05, "{distant:?}");
         assert!(map.geometry.vertices.iter().all(|vertex| vertex.position[1].abs() < 0.001));
         assert_eq!(map.geometry.collision[0].surface, 3 | (1 << 7));
         assert_eq!(map.materials[0].physics, 1);

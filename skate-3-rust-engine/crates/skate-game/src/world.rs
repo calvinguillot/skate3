@@ -31,6 +31,13 @@ fn spawn(world: &mut World) {
         (config.map.take(), config.asset_root.clone())
     };
     prepared.prepare(map.as_ref(), &root);
+    if let Some(map) = map.as_ref() {
+        world.insert_resource(crate::minimap::OverviewPicture {
+            generation: 0,
+            picture: Some(crate::minimap::picture_of(map)),
+            ready: true,
+        });
+    }
     prepared.publish(world);
 }
 

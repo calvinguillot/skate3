@@ -31,9 +31,11 @@ const SCALES: &[u32] = &[25, 50, 67, 75, 85, 100];
 const DAY_SPEEDS: &[u32] = &[0, 1, 10, 30, 60, 120, 360, 720];
 const LIMITS: &[u32] = &[0, 30, 60, 90, 120, 144, 165, 240];
 const BRIGHTNESS: &[u32] = &[25, 50, 75, 100, 125, 150, 175, 200, 225, 250];
+const MINIMAP_SIZES: &[u32] = &[140, 180, 240, 320];
 fn default_sky() -> String { "University".into() }
 fn default_brightness() -> u32 { 100 }
 fn default_minimap() -> bool { true }
+fn default_minimap_size() -> u32 { 180 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -59,6 +61,9 @@ struct GraphicsSettings {
     /// Top-right map overview.
     #[serde(default = "default_minimap")]
     minimap: bool,
+    /// Square minimap side, in pixels. The picture keeps its aspect inside it.
+    #[serde(default = "default_minimap_size")]
+    minimap_size: u32,
 }
 impl Default for GraphicsSettings {
     fn default() -> Self {
@@ -75,6 +80,7 @@ impl Default for GraphicsSettings {
             sky_preset: default_sky(),
             world_brightness: default_brightness(),
             minimap: true,
+            minimap_size: default_minimap_size(),
         }
     }
 }
@@ -100,6 +106,9 @@ impl GraphicsSettings {
         }
         if !BRIGHTNESS.contains(&self.world_brightness) {
             self.world_brightness = default_brightness();
+        }
+        if !MINIMAP_SIZES.contains(&self.minimap_size) {
+            self.minimap_size = default_minimap_size();
         }
         self
     }
@@ -160,6 +169,20 @@ impl Menu {
         }
     }
     pub(crate) fn minimap_enabled(&self) -> bool { self.settings.minimap }
+    pub(crate) fn minimap_size(&self) -> f32 { self.settings.minimap_size as f32 }
+    pub(crate) fn set_sky_preset(&mut self, name: String) -> Result<(), String> {
+        if name.is_empty() || name.len() > 64 || name.contains(['/', '\\', ':', '.']) {
+            return Err("Invalid sky name".into());
+        }
+        self.settings.sky_preset = name;
+        self.write_settings()
+    }
+    fn write_settings(&self) -> Result<(), String> {
+        let parent = self.path.parent().ok_or("Graphics settings have no folder")?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        std::fs::write(&self.path, serde_json::to_vec_pretty(&self.settings).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())
+    }
     pub(crate) fn place_on_map(&self) -> bool { self.map_place }
     pub(crate) fn place_is_fresh(&mut self) -> bool {
         let fresh = self.map_place_fresh;
@@ -207,7 +230,7 @@ const SECTIONS: &[(&str, &str)] = &[
 #[derive(Component)] struct MenuScroll;
 impl Menu {
     fn rows(&self) -> Vec<usize> {
-        if self.daylight { return vec![0, 1, 2, 63, 64, 3]; }
+        if self.daylight { return vec![0, 1, 2, 63, 64, 69, 3]; }
         if self.multiplayer {
             return if self.browser { std::iter::once(0).chain(1..=self.browser_count.min(5)).chain([6,7,8,10]).collect() } else { match self.network_page {
                 1 => vec![3,4,10],
@@ -232,7 +255,7 @@ impl Menu {
             }
             1 if self.difficulty == Difficulty::Custom => std::iter::once(3).chain(300..337).chain([CAMERA_ANGLE_ROW,8,10]).collect(),
             1 => vec![3, CAMERA_ANGLE_ROW, 8, 10],
-            2 => vec![0, 1, 2, 13, 16, 17, 18, FRAME_STATS_ROW, 67],
+            2 => vec![0, 1, 2, 13, 16, 17, 18, FRAME_STATS_ROW, 67, 68],
             4 => vec![7, 11, 14, 19],
             5 => vec![62, 4, 9, 15],
             i if i >= SECTIONS.len() => self.custom_sections.get(i-SECTIONS.len()).map_or(Vec::new(), |(_,entries)| (200..200+entries.len()).collect()),
@@ -277,6 +300,7 @@ pub(crate) struct GraphicsMenuPlugin;
 impl Plugin for GraphicsMenuPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(FramePacer(Instant::now()))
+            .init_resource::<crate::retail_sky::SkyImport>()
             .add_systems(PostStartup, setup.in_set(PresentationSetup))
             .add_systems(PreUpdate, (refresh_sections, interact, apply_custom_difficulty).chain().in_set(MenuInput).after(bevy::input::InputSystems))
             .add_systems(PreUpdate, finish_menu_travel.after(crate::map_transition::MapTransitionSet).before(crate::input::poll_controllers))
@@ -285,6 +309,7 @@ impl Plugin for GraphicsMenuPlugin {
             .add_systems(Update, custom_sliders.before(labels))
             .add_systems(Update, (crate::map_render::advance_day, apply, labels, scroll_menu, resize_menu).chain())
             .add_systems(Update, (
+                crate::retail_sky::poll_import,
                 crate::map_render::sync_imported_sky,
                 crate::map_render::apply_imported_light,
             ).chain().after(crate::retail_render::AdvanceFrameState))
@@ -372,7 +397,7 @@ fn setup(
                 body.spawn((Text::new(""),MenuSubtitle,TextFont {font_size:16.,..default()},TextColor(Color::srgb(0.65,0.72,0.72))));
                 body.spawn((Node {height:px(3),width:px(64),margin:UiRect::bottom(px(10)),..default()},BackgroundColor(Color::srgb(0.78,0.96,0.3))));
                 body.spawn((MenuScroll,ScrollPosition::default(),Node {flex_grow:1.,min_height:px(0),overflow:Overflow::scroll_y(),flex_direction:FlexDirection::Column,row_gap:px(8),..default()})).with_children(|list| {
-                    for i in [62].into_iter().chain([0, 1, 2, 63, 64, 3]).chain(300..337).chain(4..10).chain(11..20).chain(20..27).chain([10, FRAME_STATS_ROW, 67, 66, 65, 60, 61]).chain(200..264).chain([50, 51]).chain(1000..1160).chain(1_000_000..1_000_000+destinations.len()) {
+                    for i in [62].into_iter().chain([0, 1, 2, 63, 64, 69, 3]).chain(300..337).chain(4..10).chain(11..20).chain(20..27).chain([10, FRAME_STATS_ROW, 67, 68, 66, 65, 60, 61]).chain(200..264).chain([50, 51]).chain(1000..1160).chain(1_000_000..1_000_000+destinations.len()) {
                         list.spawn((Button,MenuRow(i),Node {flex_direction:if (300..335).contains(&i) {FlexDirection::Column} else {FlexDirection::Row},width:percent(100),min_height:px(56),flex_shrink:0.,padding:UiRect::axes(px(18),px(12)),align_items:AlignItems::Center,border_radius:BorderRadius::all(px(4)),..default()},BackgroundColor(Color::srgb(0.075,0.09,0.095))))
                             .with_children(|row| {
                                 row.spawn((MenuLabel(i),Text::new(""),TextFont {font_size:18.,..default()},TextColor(Color::WHITE)));
@@ -446,12 +471,13 @@ pub(crate) fn interact(
     mut exit: MessageWriter<AppExit>,
     mut net: ResMut<crate::multiplayer::Multiplayer>,
     mut typing: MessageReader<bevy::input::keyboard::KeyboardInput>,
-    (mut updater, mut audio, mut camera_angle, mut keyboard, mut imports): (
+    (mut updater, mut audio, mut camera_angle, mut keyboard, mut imports, mut skies): (
         ResMut<crate::updater::Updater>,
         ResMut<crate::game_audio::AudioSettings>,
         ResMut<crate::camera::CameraAngleSettings>,
         ResMut<crate::input::keyboard::VirtualPad>,
         ResMut<crate::map_import::MapImport>,
+        ResMut<crate::retail_sky::SkyImport>,
     ),
     travel: Res<crate::teleport_menu::Travel>,
     mut mods: ResMut<crate::modding::ModMenu>,
@@ -528,7 +554,7 @@ pub(crate) fn interact(
         if keys.just_pressed(KeyCode::ArrowDown) || nav.pressed & 2 != 0 {
             menu.selected = visible[(index + 1) % rows];
         }
-        let adjustable = (menu.section == 1 && menu.difficulty == Difficulty::Custom && (300..335).contains(&menu.selected)) || (menu.daylight && (menu.selected < 3 || matches!(menu.selected, 63 | 64))) || (!menu.multiplayer && !menu.daylight && (menu.selected < 4 || AUDIO_ROWS.contains(&menu.selected) || menu.selected == FRAME_STATS_ROW || menu.selected == 67))
+        let adjustable = (menu.section == 1 && menu.difficulty == Difficulty::Custom && (300..335).contains(&menu.selected)) || (menu.daylight && (menu.selected < 3 || matches!(menu.selected, 63 | 64))) || (!menu.multiplayer && !menu.daylight && (menu.selected < 4 || AUDIO_ROWS.contains(&menu.selected) || menu.selected == FRAME_STATS_ROW || menu.selected == 67 || menu.selected == 68))
             || (!menu.multiplayer && !menu.daylight && menu.section == 1 && menu.selected == CAMERA_ANGLE_ROW)
             || (menu.section == 5 && matches!(menu.selected, 4 | 9 | 15 | 62))
             || (menu.section == 0 && menu.selected == 60);
@@ -605,6 +631,14 @@ pub(crate) fn interact(
                     menu.settings.sky_preset = crate::retail_sky::cycle_preset(&menu.settings.sky_preset, &names, direction);
                 }
                 64 => menu.settings.world_brightness = cycle(BRIGHTNESS, menu.settings.world_brightness, direction),
+                69 if direction > 0 => {
+                    if skies.busy() {
+                        menu.status = "A sky import is already running.".into();
+                    } else {
+                        skies.begin(config.asset_root.clone());
+                        menu.status = "Choose a sky image. PNG, JPEG, and raw RGBA are accepted.".into();
+                    }
+                }
                 _ => { menu.daylight = false; menu.selected = 13; }
             }
         } else if menu.browser {
@@ -712,6 +746,7 @@ pub(crate) fn interact(
                 65 => { menu.select_section(2); menu.daylight = true; menu.selected = 0; menu.status = "Imported maps: skybox, brightness, sun time and ambient fill. Retail lighting stays authored.".into(); },
                 66 => { menu.map_place = true; menu.map_place_fresh = true; menu.status.clear(); },
                 67 => menu.settings.minimap = !menu.settings.minimap,
+                68 => menu.settings.minimap_size = cycle(MINIMAP_SIZES, menu.settings.minimap_size, direction),
                 14 => mods.begin(),
                 16..=18 => menu.status = audio.adjust(audio_row(row), direction),
                 FRAME_STATS_ROW => {
@@ -743,7 +778,7 @@ pub(crate) fn interact(
                 _ => {}
             }
         }
-        if ((!menu.multiplayer && !menu.daylight && !day_action) && (row < 3 || row == FRAME_STATS_ROW || row == 67))
+        if ((!menu.multiplayer && !menu.daylight && !day_action) && (row < 3 || row == FRAME_STATS_ROW || row == 67 || row == 68))
             || (day_action && (row < 3 || row == 63 || row == 64))
         {
             let save = (|| -> Result<(), String> {
@@ -842,11 +877,12 @@ fn labels(
     mut headings: Query<(&mut Text, Has<MenuTitle>), (Or<(With<MenuTitle>, With<MenuSubtitle>)>, Without<StatusLabel>)>,
     mut status: Single<&mut Text, With<StatusLabel>>,
     debug: (Res<crate::modding::Mods>, Res<crate::physics::GamePhysics>, Res<crate::multiplayer::appearance::Appearances>, Res<crate::input::ControllerInput>),
-    (audio, camera_angle, keyboard, imports): (
+    (audio, camera_angle, keyboard, imports, skies): (
         Option<Res<crate::game_audio::AudioSettings>>,
         Res<crate::camera::CameraAngleSettings>,
         Res<crate::input::keyboard::VirtualPad>,
         Res<crate::map_import::MapImport>,
+        Res<crate::retail_sky::SkyImport>,
     ),
     mut buttons: Query<(&MenuRow, &Interaction, &mut BackgroundColor, &mut Node), Without<MenuRoot>>,
 ) {
@@ -910,6 +946,7 @@ fn labels(
                 },
                 63 => format!("Skybox               {}", s.sky_preset),
                 64 => format!("World brightness     {}%", s.world_brightness),
+                69 => if skies.busy() { "Importing sky...".into() } else { "Import sky image...".into() },
                 3 => "Back".into(),
                 _ => String::new(),
             }
@@ -1002,6 +1039,7 @@ fn labels(
                 19 => controller_label(&debug.3),
                 FRAME_STATS_ROW => format!("Frame-time counter    {}", if !s.frame_stats { "Off" } else if s.frame_stats_simple { "Simple" } else { "Verbose" }),
                 67 => format!("Minimap               {}", if s.minimap { "On" } else { "Off" }),
+                68 => format!("Minimap size          {} px", s.minimap_size),
                 _ => "Multiplayer".into(),
             }
         };
@@ -1203,7 +1241,7 @@ mod tests {
             unique.dedup();
             assert_eq!(unique.len(), rows.len(), "duplicate row ids in section {section}: {rows:?}");
             // Audio, controller identity, frame-time, import, sky, minimap and map-place rows are spawned.
-            assert!(rows.iter().all(|id| *id < 20 || *id == FRAME_STATS_ROW || matches!(*id, 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67) || *id >= 1000));
+            assert!(rows.iter().all(|id| *id < 20 || *id == FRAME_STATS_ROW || matches!(*id, 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69) || *id >= 1000));
         }
         menu.select_section(1);
         assert_eq!(menu.rows(),vec![3,CAMERA_ANGLE_ROW,8,10]);
@@ -1242,9 +1280,9 @@ mod tests {
         assert!(!SECTIONS.iter().any(|(name,_)| matches!(*name,"SESSION"|"WORLD")));
         menu.select_section(2);
         assert!(!menu.multiplayer && !menu.browser);
-        assert_eq!(menu.rows(), vec![0,1,2,13,16,17,18,FRAME_STATS_ROW,67]);
+        assert_eq!(menu.rows(), vec![0,1,2,13,16,17,18,FRAME_STATS_ROW,67,68]);
         menu.daylight = true;
-        assert_eq!(menu.rows(), vec![0, 1, 2, 63, 64, 3]);
+        assert_eq!(menu.rows(), vec![0, 1, 2, 63, 64, 69, 3]);
     }
     #[test]
     fn frame_counter_setting_defaults_off_and_round_trips() {
@@ -1298,7 +1336,7 @@ fn custom_sliders(mut menu: ResMut<Menu>, mouse: Res<ButtonInput<MouseButton>>,
     if let Some(index)=*dragging {
         if let Some((_,position))=tracks.iter().find(|(t,_)|t.0==index) {
             if let Some(pos)=position.normalized {
-                menu.custom.set_fraction(index,pos.x); menu.custom_dirty=true; menu.selected=300+index;
+                menu.custom.set_fraction(index, pos.x + 0.5); menu.custom_dirty=true; menu.selected=300+index;
             }
         }
     }

@@ -35,9 +35,11 @@ impl Plugin for InputPlugin {
         app.init_resource::<ControllerInput>()
             .init_resource::<PublishedTickInput>()
             .init_resource::<keyboard::VirtualPad>()
+            .init_resource::<keyboard::PlayGate>()
             .add_systems(Startup, (start_controllers, load_keyboard).chain())
             .add_systems(PreUpdate, (
-                keyboard::accumulate_mouse.after(bevy::input::InputSystems),
+                keyboard::update_gate.after(crate::graphics_menu::MenuInput),
+                keyboard::accumulate_mouse.after(keyboard::update_gate),
                 poll_controllers.run_if(crate::graphics_menu::gameplay_active).after(keyboard::accumulate_mouse),
             ))
             .add_systems(FixedUpdate, (keyboard::step_stick, publish_actions).chain().in_set(SimulationSet::Input))
@@ -113,7 +115,7 @@ fn load_keyboard(config: Res<crate::config::Config>, mut pad: ResMut<keyboard::V
     *pad = keyboard::VirtualPad::load(&config.asset_root);
 }
 
-pub(crate) fn poll_controllers(mut input: ResMut<ControllerInput>,config:Res<crate::config::Config>,net:Option<Res<crate::multiplayer::Multiplayer>>,windows:Query<&Window>,mut capabilities:Local<[platform::CapabilityCache;4]>,pad:Res<keyboard::VirtualPad>,keys:Res<ButtonInput<KeyCode>>,mouse:Res<ButtonInput<MouseButton>>) {
+pub(crate) fn poll_controllers(mut input: ResMut<ControllerInput>,config:Res<crate::config::Config>,net:Option<Res<crate::multiplayer::Multiplayer>>,windows:Query<&Window>,mut capabilities:Local<[platform::CapabilityCache;4]>,pad:Res<keyboard::VirtualPad>,gate:Res<keyboard::PlayGate>,keys:Res<ButtonInput<KeyCode>>,mouse:Res<ButtonInput<MouseButton>>) {
     let previous = input.status;
     let previous_kinds = input.kinds.clone();
     let focused=windows.iter().any(|w|w.focused);
@@ -125,7 +127,7 @@ pub(crate) fn poll_controllers(mut input: ResMut<ControllerInput>,config:Res<cra
         } else {platform::poll_cached(slot, &mut capabilities[slot])}
     });
     // A keyboard stands in for a missing pad, and adds to a pad that is already there.
-    if focused && pad.enabled {
+    if gate.active {
         let keyboard = pad.xbox_state(&keys, &mouse);
         let slot = samples.iter().position(|sample| sample.is_ok()).unwrap_or(0);
         match &mut samples[slot] {

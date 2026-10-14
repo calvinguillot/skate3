@@ -48,6 +48,7 @@ struct PreparedWorld {
     retail: bool,
     triggers: crate::trigger_volumes::TriggerVolumes,
     difficulty: crate::difficulty::Difficulty,
+    picture: Option<crate::minimap::MapPicture>,
 }
 
 enum Phase {
@@ -126,6 +127,7 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
         let triggers = crate::trigger_volumes::TriggerVolumes::load_or_warn(selected.path.as_deref(), map.as_ref());
         let metadata = CurrentMap::from_package(selected.path, map.as_ref());
         let retail = map.as_ref().is_some_and(|m| crate::retail_render::RetailScene::for_map(m));
+        let picture = map.as_ref().map(crate::minimap::picture_of);
         // Both builders only read the decoded package. Reserve render handles
         // on a second worker while the first constructs fresh simulation state;
         // neither publishes to the live world until both have succeeded.
@@ -162,7 +164,7 @@ fn start(world: &World, entry: Entry) -> Result<Phase, String> {
             simulation_time.as_millis(), render_time.as_millis(), started.elapsed().as_millis());
         // Drop the decoded package on this worker. Physics and rendering now
         // own their data; retaining it would double large-city CPU memory.
-        Ok(PreparedWorld { map_fingerprint, scene, physics, skater, controls, camera, metadata, retail, triggers, difficulty })
+        Ok(PreparedWorld { map_fingerprint, scene, physics, skater, controls, camera, metadata, retail, triggers, difficulty, picture })
     }).map_err(|e| format!("Could not start map loader: {e}"))?;
     Ok(Phase::Loading { entry, progress, job })
 }
@@ -212,6 +214,11 @@ fn failed(world: &mut World, error: String) {
 fn commit(world: &mut World, mut prepared: PreparedWorld) -> String {
     let publication_started = Instant::now();
     prepared.metadata.generation = world.resource::<CurrentMap>().generation + 1;
+    let generation = prepared.metadata.generation;
+    match prepared.picture.take() {
+        Some(picture) => world.insert_resource(crate::minimap::OverviewPicture { generation, picture: Some(picture), ready: true }),
+        None => world.insert_resource(crate::minimap::OverviewPicture { generation, picture: None, ready: false }),
+    }
     // All fallible decoding/validation/construction finished before this point.
     // No simulation system can observe a mixture of the two worlds.
     crate::map_render::MapAssets::retire(world);

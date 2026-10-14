@@ -1,8 +1,11 @@
 //! Top-down map overview, the corner HUD, and the pause-menu click-to-spawn view.
 //!
-//! The picture is painted once per loaded world from collision triangles. The
-//! corner widget scrolls that picture around the skater. The pause-menu view
-//! shows the whole map and raycasts a clicked (X, Z) down onto the ground.
+//! World +X is to the left and world +Z (yaw 0, the way the skater faces) is
+//! toward the top. The rendered world is the reference; this view is mirrored
+//! in X so it matches that picture. The picture fits the whole map in the square at one
+//! metres-per-pixel, letterboxed when the bounds are not square. Imported and
+//! retail maps are painted from render triangles while the package is still in
+//! memory. The test world, which has no package, keeps the height shading.
 use crate::graphics_menu::Menu;
 use crate::map_transition::CurrentMap;
 use crate::physics::{GamePhysics, SkaterRuntime};
@@ -11,13 +14,34 @@ use bevy::ui::RelativeCursorPosition;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use skate_core::math::Vector3;
 use skate_core::physics::board_world::{BoardWorld, WorldTriangle};
+use skate_data::skate_map::SkateMap;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const SIZE: usize = 512;
 const FRAME: f32 = 180.;
 const PICKER: f32 = 560.;
-const VIEW_METRES: f32 = 120.;
+const HEADROOM: f32 = 2.;
+/// `normal.y` above this is ground rather than a wall. About 70° from flat.
+const WALKABLE: f32 = 0.35;
+
+/// Albedo overview produced on the map loader, applied when that world's generation is current.
+#[derive(Resource, Default)]
+pub(crate) struct OverviewPicture {
+    pub generation: u64,
+    pub picture: Option<MapPicture>,
+    pub ready: bool,
+}
+
+pub(crate) struct MapPicture {
+    rgba: Vec<u8>,
+    min_x: f32,
+    max_x: f32,
+    min_z: f32,
+    max_z: f32,
+    min_y: f32,
+    max_y: f32,
+}
 
 #[derive(Resource, Default)]
 pub(crate) struct MapOverview {
@@ -34,6 +58,8 @@ pub(crate) struct MapOverview {
 struct PlotTri {
     p: [[f32; 3]; 3],
     ny: f32,
+    /// Albedo at the centroid. Absent pictures use the height ramp.
+    color: Option<[u8; 3]>,
 }
 
 struct Raster {
@@ -51,6 +77,7 @@ pub(crate) struct MinimapPlugin;
 impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MapOverview>()
+            .init_resource::<OverviewPicture>()
             .add_systems(PostStartup, setup)
             .add_systems(Update, (rebuild, update_hud, update_picker).chain());
     }
@@ -58,6 +85,10 @@ impl Plugin for MinimapPlugin {
 
 #[derive(Component)]
 struct MinimapRoot;
+#[derive(Component)]
+struct MinimapFrame;
+#[derive(Component)]
+struct MinimapNorth;
 #[derive(Component)]
 struct MinimapImage;
 #[derive(Component)]
@@ -98,7 +129,7 @@ fn setup(mut commands: Commands) {
         },
         BackgroundColor(Color::srgb(0.04, 0.05, 0.06)),
     )).with_children(|root| {
-        root.spawn(frame).with_children(|frame| {
+        root.spawn((MinimapFrame, frame)).with_children(|frame| {
             frame.spawn((
                 MinimapImage,
                 ImageNode::default(),
@@ -111,6 +142,7 @@ fn setup(mut commands: Commands) {
             spawn_pin(frame, MinimapPin(1), Color::srgb(0.35, 0.85, 0.95), false);
             spawn_pin(frame, MinimapPin(2), Color::srgb(0.95, 0.45, 0.2), false);
             frame.spawn((
+                MinimapNorth,
                 Text::new("N"),
                 TextFont { font_size: 12., ..default() },
                 TextColor(Color::srgb(0.9, 0.95, 0.9)),
@@ -153,7 +185,7 @@ fn setup(mut commands: Commands) {
                 TextColor(Color::WHITE),
             ));
             column.spawn((
-                Text::new("Left click teleports and resumes. Right click also saves that spot as the map's default spawn."),
+                Text::new("Scroll or + / − zooms toward the cursor. Middle-drag or the arrows pan. Left click teleports and resumes. Right click also saves that spot."),
                 TextFont { font_size: 14., ..default() },
                 TextColor(Color::srgb(0.7, 0.76, 0.74)),
                 Node { max_width: px(PICKER), ..default() },
@@ -171,7 +203,12 @@ fn setup(mut commands: Commands) {
                     PickerImage,
                     ImageNode::default(),
                     RelativeCursorPosition::default(),
-                    Node { width: px(PICKER), height: px(PICKER), ..default() },
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: px(PICKER),
+                        height: px(PICKER),
+                        ..default()
+                    },
                 ));
                 spawn_pin(frame, PickerPin(0), Color::srgb(0.95, 0.85, 0.2), true);
                 spawn_pin(frame, PickerPin(1), Color::srgb(0.35, 0.85, 0.95), false);
@@ -238,6 +275,7 @@ fn px(value: f32) -> Val { Val::Px(value) }
 
 fn rebuild(
     mut overview: ResMut<MapOverview>,
+    picture: Res<OverviewPicture>,
     mut images: ResMut<Assets<Image>>,
     physics: Res<GamePhysics>,
     current: Option<Res<CurrentMap>>,
@@ -247,23 +285,42 @@ fn rebuild(
     if overview.ready && *built == Some(generation) {
         return;
     }
+    if picture.ready && picture.generation == generation {
+        if let Some(shot) = &picture.picture {
+            install_picture(&mut overview, &mut images, shot);
+            *built = Some(generation);
+            return;
+        }
+    }
     let triangles = physics.world_triangles();
     if triangles.is_empty() {
         return;
     }
     let raster = rasterize(triangles);
+    install_picture(&mut overview, &mut images, &MapPicture {
+        rgba: raster.rgba,
+        min_x: raster.min_x,
+        max_x: raster.max_x,
+        min_z: raster.min_z,
+        max_z: raster.max_z,
+        min_y: raster.min_y,
+        max_y: raster.max_y,
+    });
+    *built = Some(generation);
+}
+
+fn install_picture(overview: &mut MapOverview, images: &mut Assets<Image>, picture: &MapPicture) {
     if overview.image != Handle::default() {
         images.remove(&overview.image);
     }
-    overview.image = images.add(overview_image(&raster.rgba));
-    overview.min_x = raster.min_x;
-    overview.max_x = raster.max_x;
-    overview.min_z = raster.min_z;
-    overview.max_z = raster.max_z;
-    overview.min_y = raster.min_y;
-    overview.max_y = raster.max_y;
+    overview.image = images.add(overview_image(&picture.rgba));
+    overview.min_x = picture.min_x;
+    overview.max_x = picture.max_x;
+    overview.min_z = picture.min_z;
+    overview.max_z = picture.max_z;
+    overview.min_y = picture.min_y;
+    overview.max_y = picture.max_y;
     overview.ready = true;
-    *built = Some(generation);
 }
 
 fn update_hud(
@@ -276,9 +333,11 @@ fn update_hud(
     models: Option<Res<crate::custom_models::CustomModels>>,
     travel: Option<Res<crate::teleport_menu::Travel>>,
     mods: Option<Res<crate::modding::ModMenu>>,
-    mut root: Query<&mut Node, (With<MinimapRoot>, Without<MinimapImage>, Without<MinimapPin>)>,
-    mut images: Query<(&mut Node, &mut ImageNode), (With<MinimapImage>, Without<MinimapRoot>, Without<MinimapPin>)>,
-    mut pins: Query<(&MinimapPin, &mut Node, &mut UiTransform), (Without<MinimapImage>, Without<MinimapRoot>)>,
+    mut root: Query<&mut Node, (With<MinimapRoot>, Without<MinimapImage>, Without<MinimapPin>, Without<MinimapFrame>, Without<MinimapNorth>)>,
+    mut frames: Query<&mut Node, (With<MinimapFrame>, Without<MinimapRoot>, Without<MinimapImage>, Without<MinimapNorth>, Without<MinimapPin>)>,
+    mut north: Query<&mut Node, (With<MinimapNorth>, Without<MinimapRoot>, Without<MinimapFrame>, Without<MinimapImage>, Without<MinimapPin>)>,
+    mut images: Query<(&mut Node, &mut ImageNode), (With<MinimapImage>, Without<MinimapRoot>, Without<MinimapPin>, Without<MinimapFrame>, Without<MinimapNorth>)>,
+    mut pins: Query<(&MinimapPin, &mut Node, &mut UiTransform), (Without<MinimapImage>, Without<MinimapRoot>, Without<MinimapFrame>, Without<MinimapNorth>)>,
     mut readout: Query<&mut Text, With<MinimapReadout>>,
 ) {
     let hidden = menu.as_ref().is_none_or(|menu| menu.open || menu.place_on_map() || !menu.minimap_enabled())
@@ -292,19 +351,28 @@ fn update_hud(
     root.display = if hidden { Display::None } else { Display::Flex };
     if hidden { return; }
     let menu = menu.unwrap();
+    let frame = menu.minimap_size();
     root.top = px(if menu.frame_stats_visible() { 78. } else { 16. });
+    root.width = px(frame);
+    if let Ok(mut node) = frames.single_mut() {
+        node.width = px(frame);
+        node.height = px(frame);
+    }
+    if let Ok(mut node) = north.single_mut() {
+        node.left = px(frame * 0.5 - 4.);
+    }
     let skater = skater.unwrap();
     let pose = skater.animated_skeleton.roots.animation_to_world;
     let (x, y, z) = (pose[3][0], pose[3][1], pose[3][2]);
     let yaw = pose[2][0].atan2(pose[2][2]);
     if let Ok((mut node, mut image)) = images.single_mut() {
         image.image = overview.image.clone();
-        let layout = frame_layout(&overview, x, z, FRAME);
+        let layout = fit_layout(&overview, frame);
         node.width = px(layout.image_w);
         node.height = px(layout.image_h);
         node.left = px(layout.left);
         node.top = px(layout.top);
-        place_pins(&overview, &mut pins, layout, x, z, yaw, current.as_deref().map(|map| map.spawn), session.as_ref().and_then(|marker| marker.placed_position()));
+        place_pins(&overview, &mut pins, layout, x, z, yaw, frame, current.as_deref().map(|map| map.spawn), session.as_ref().and_then(|marker| marker.placed_position()));
     }
     if let Ok(mut text) = readout.single_mut() {
         **text = format!("X {x:.0}   Y {y:.1}   Z {z:.0}");
@@ -321,41 +389,68 @@ fn update_picker(
     mut time: ResMut<Time<Virtual>>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut root: Query<&mut Node, (With<PickerRoot>, Without<PickerPin>)>,
-    mut image: Query<(&mut ImageNode, &RelativeCursorPosition), With<PickerImage>>,
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut root: Query<&mut Node, (With<PickerRoot>, Without<PickerPin>, Without<PickerImage>)>,
+    mut image: Query<(&mut Node, &mut ImageNode, &RelativeCursorPosition), With<PickerImage>>,
     mut pins: Query<(&PickerPin, &mut Node, &mut UiTransform), (Without<PickerImage>, Without<PickerRoot>)>,
     mut readout: Query<&mut Text, With<PickerReadout>>,
     buttons: Query<(&PickerButton, &Interaction)>,
-    mut hover: Local<Option<[f32; 3]>>,
+    mut state: Local<PickerState>,
 ) {
+    let mut steps = wheel.read().map(|event| {
+        event.y * if event.unit == bevy::input::mouse::MouseScrollUnit::Line { 1. } else { 1. / 40. }
+    }).sum::<f32>();
     let open = menu.as_ref().is_some_and(|menu| menu.place_on_map()) && overview.ready;
     let Ok(mut root) = root.single_mut() else { return };
     root.display = if open { Display::Flex } else { Display::None };
     if !open {
-        *hover = None;
+        *state = PickerState::default();
         return;
     }
     let fresh = menu.as_mut().is_some_and(|menu| menu.place_is_fresh());
-    let Ok((mut picture, cursor)) = image.single_mut() else { return };
-    picture.image = overview.image.clone();
-    if cursor.cursor_over() {
-        if let Some(point) = cursor.normalized {
-            let (x, z) = uv_to_xz(point.x.clamp(0., 1.), point.y.clamp(0., 1.), &overview);
-            let y = ground_y(physics.world(), x, z, overview.min_y, overview.max_y);
-            *hover = Some([x, y.unwrap_or(overview.min_y.max(0.)), z]);
-        }
+    let Ok((mut node, mut picture, cursor)) = image.single_mut() else { return };
+    if fresh {
+        state.zoom = 1.;
+        state.center_x = (overview.min_x + overview.max_x) * 0.5;
+        state.center_z = (overview.min_z + overview.max_z) * 0.5;
+        state.drag = None;
     }
-    if let (Ok(mut text), Some(spot)) = (readout.single_mut(), *hover) {
-        let ground = ground_y(physics.world(), spot[0], spot[2], overview.min_y, overview.max_y);
+    if keys.just_pressed(KeyCode::Equal) || keys.just_pressed(KeyCode::NumpadAdd) { steps += 1.; }
+    if keys.just_pressed(KeyCode::Minus) || keys.just_pressed(KeyCode::NumpadSubtract) { steps -= 1.; }
+    // Bevy's cursor is centered: (-0.5, -0.5) is the node's top-left.
+    let cursor_uv = cursor.normalized.filter(|_| cursor.cursor_over()).map(|point| cursor_to_uv(point.x, point.y));
+    if steps.abs() > f32::EPSILON {
+        zoom_about(&mut state, &overview, steps, cursor_uv);
+    }
+    pan_from_keys(&mut state, &overview, &keys);
+    pan_from_drag(&mut state, &overview, cursor_uv, mouse.pressed(MouseButton::Middle));
+    let window = map_window(&overview, state.zoom, state.center_x, state.center_z);
+    state.center_x = (window.min_x + window.max_x) * 0.5;
+    state.center_z = (window.min_z + window.max_z) * 0.5;
+    picture.image = overview.image.clone();
+    picture.rect = picker_crop(&overview, &window);
+    picture.image_mode = NodeImageMode::Stretch;
+    let layout = fit_window(&window, PICKER);
+    node.width = px(layout.image_w);
+    node.height = px(layout.image_h);
+    node.left = px(layout.left);
+    node.top = px(layout.top);
+    if let Some((u, v)) = cursor_uv {
+        let (x, z) = window_to_xz(u, v, &window);
+        let y = walkable_surface(physics.world(), x, z, overview.min_y, overview.max_y);
+        state.hover = Some([x, y.unwrap_or(overview.min_y.max(0.)), z]);
+    }
+    if let (Ok(mut text), Some(spot)) = (readout.single_mut(), state.hover) {
+        let ground = walkable_surface(physics.world(), spot[0], spot[2], overview.min_y, overview.max_y);
+        let magnification = if state.zoom > 1.05 { format!("    {:.1}×", state.zoom) } else { String::new() };
         **text = match ground {
-            Some(y) => format!("X {:.1}    Y {:.1}    Z {:.1}", spot[0], y, spot[2]),
-            None => format!("X {:.1}    no ground    Z {:.1}", spot[0], spot[2]),
+            Some(y) => format!("X {:.1}    Y {:.1}    Z {:.1}{magnification}", spot[0], y, spot[2]),
+            None => format!("X {:.1}    no ground    Z {:.1}{magnification}", spot[0], spot[2]),
         };
     }
     if let Some(skater) = skater.as_ref() {
         let pose = skater.animated_skeleton.roots.animation_to_world;
-        let layout = Layout { image_w: PICKER, image_h: PICKER, left: 0., top: 0. };
-        place_picker_pins(&overview, &mut pins, layout, pose[3][0], pose[3][2], pose[2][0].atan2(pose[2][2]), current.as_ref().map(|map| map.spawn));
+        place_picker_pins(&window, &mut pins, layout, pose[3][0], pose[3][2], pose[2][0].atan2(pose[2][2]), current.as_ref().map(|map| map.spawn));
     }
     if fresh { return; }
     let back = mouse.just_pressed(MouseButton::Left) && buttons.iter().any(|(button, state)| button.0 == 0 && *state == Interaction::Pressed);
@@ -369,7 +464,7 @@ fn update_picker(
     let right = mouse.just_pressed(MouseButton::Right) && on_map;
     let confirm = keys.just_pressed(KeyCode::Enter);
     if !(left || right || save_button || confirm) { return; }
-    let Some(spot) = *hover else {
+    let Some(spot) = state.hover else {
         if let Some(menu) = menu.as_mut() { menu.set_status("Move the cursor over the map first.".into()); }
         return;
     };
@@ -395,7 +490,8 @@ fn update_picker(
         }
     }
     let Some(skater) = skater.as_mut() else { return };
-    let y = ground_y(physics.world(), spot[0], spot[2], overview.min_y, overview.max_y).unwrap_or(spot[1]) + 0.35;
+    let contact = walkable_surface(physics.world(), spot[0], spot[2], overview.min_y, overview.max_y).unwrap_or(spot[1]);
+    let y = contact + board_lift(&physics);
     let matrix = placement(skater, spot[0], y, spot[2]);
     match skater.travel_to(matrix) {
         Ok(()) => {
@@ -415,28 +511,166 @@ struct Layout {
     top: f32,
 }
 
-fn frame_layout(overview: &MapOverview, x: f32, z: f32, frame: f32) -> Layout {
-    let span_x = (overview.max_x - overview.min_x).max(1.);
-    let span_z = (overview.max_z - overview.min_z).max(1.);
-    let view = VIEW_METRES.min(span_x.max(span_z));
-    let pixels = frame / view;
-    let image_w = span_x * pixels;
-    let image_h = span_z * pixels;
-    let (u, v) = uv_of(overview, x, z);
-    let mut left = frame * 0.5 - u * image_w;
-    let mut top = frame * 0.5 - v * image_h;
-    if image_w <= frame { left = (frame - image_w) * 0.5; } else { left = left.clamp(frame - image_w, 0.); }
-    if image_h <= frame { top = (frame - image_h) * 0.5; } else { top = top.clamp(frame - image_h, 0.); }
-    Layout { image_w, image_h, left, top }
+/// Fit the whole map in `frame` pixels. One scale for both axes, so a wide map is letterboxed.
+fn fit_layout(overview: &MapOverview, frame: f32) -> Layout {
+    fit_spans(overview.max_x - overview.min_x, overview.max_z - overview.min_z, frame)
+}
+
+fn fit_window(window: &MapWindow, frame: f32) -> Layout {
+    fit_spans(window.max_x - window.min_x, window.max_z - window.min_z, frame)
+}
+
+fn fit_spans(span_x: f32, span_z: f32, frame: f32) -> Layout {
+    let span_x = span_x.max(1.);
+    let span_z = span_z.max(1.);
+    let scale = frame / span_x.max(span_z);
+    let image_w = span_x * scale;
+    let image_h = span_z * scale;
+    Layout {
+        image_w,
+        image_h,
+        left: (frame - image_w) * 0.5,
+        top: (frame - image_h) * 0.5,
+    }
+}
+
+const PICKER_ZOOM_MIN: f32 = 1.;
+const PICKER_ZOOM_MAX: f32 = 64.;
+const PICKER_ZOOM_STEP: f32 = 1.25;
+
+struct PickerState {
+    hover: Option<[f32; 3]>,
+    zoom: f32,
+    center_x: f32,
+    center_z: f32,
+    drag: Option<(f32, f32)>,
+    pan_at: Option<std::time::Instant>,
+}
+
+impl Default for PickerState {
+    fn default() -> Self {
+        Self { hover: None, zoom: 1., center_x: 0., center_z: 0., drag: None, pan_at: None }
+    }
+}
+
+struct MapWindow {
+    min_x: f32,
+    max_x: f32,
+    min_z: f32,
+    max_z: f32,
+}
+
+/// Visible world rectangle. Zoom 1 is the whole map. The window keeps the map's aspect, so the letterbox does not move.
+fn map_window(overview: &MapOverview, zoom: f32, center_x: f32, center_z: f32) -> MapWindow {
+    let span_x = (overview.max_x - overview.min_x).max(0.01);
+    let span_z = (overview.max_z - overview.min_z).max(0.01);
+    let zoom = zoom.clamp(PICKER_ZOOM_MIN, PICKER_ZOOM_MAX);
+    let (min_x, max_x) = clamp_span(overview.min_x, overview.max_x, center_x, span_x / zoom);
+    let (min_z, max_z) = clamp_span(overview.min_z, overview.max_z, center_z, span_z / zoom);
+    MapWindow { min_x, max_x, min_z, max_z }
+}
+
+fn clamp_span(min_bound: f32, max_bound: f32, center: f32, size: f32) -> (f32, f32) {
+    let span = max_bound - min_bound;
+    if size >= span - 0.0001 {
+        return (min_bound, max_bound);
+    }
+    let mut start = center - size * 0.5;
+    let mut end = center + size * 0.5;
+    if start < min_bound {
+        end += min_bound - start;
+        start = min_bound;
+    }
+    if end > max_bound {
+        start -= end - max_bound;
+        end = max_bound;
+    }
+    (start, end)
+}
+
+fn zoom_about(state: &mut PickerState, overview: &MapOverview, steps: f32, cursor_uv: Option<(f32, f32)>) {
+    let next = (state.zoom * PICKER_ZOOM_STEP.powf(steps)).clamp(PICKER_ZOOM_MIN, PICKER_ZOOM_MAX);
+    if let Some((u, v)) = cursor_uv {
+        let window = map_window(overview, state.zoom, state.center_x, state.center_z);
+        let (x, z) = window_to_xz(u, v, &window);
+        let (center_x, center_z) = center_on_cursor(x, z, u, v, overview, next);
+        state.center_x = center_x;
+        state.center_z = center_z;
+    }
+    state.zoom = next;
+}
+
+fn center_on_cursor(x: f32, z: f32, u: f32, v: f32, overview: &MapOverview, zoom: f32) -> (f32, f32) {
+    let span_x = (overview.max_x - overview.min_x).max(0.01);
+    let span_z = (overview.max_z - overview.min_z).max(0.01);
+    let width = span_x / zoom.clamp(PICKER_ZOOM_MIN, PICKER_ZOOM_MAX);
+    let height = span_z / zoom.clamp(PICKER_ZOOM_MIN, PICKER_ZOOM_MAX);
+    (x + width * (u - 0.5), z - height * (0.5 - v))
+}
+
+fn pan_from_keys(state: &mut PickerState, overview: &MapOverview, keys: &ButtonInput<KeyCode>) {
+    let dx = (keys.pressed(KeyCode::ArrowRight) as i32 - keys.pressed(KeyCode::ArrowLeft) as i32) as f32;
+    let dz = (keys.pressed(KeyCode::ArrowUp) as i32 - keys.pressed(KeyCode::ArrowDown) as i32) as f32;
+    if dx == 0. && dz == 0. {
+        state.pan_at = None;
+        return;
+    }
+    let now = std::time::Instant::now();
+    let dt = state.pan_at.map(|then| now.saturating_duration_since(then).as_secs_f32()).unwrap_or(0.).min(0.05);
+    state.pan_at = Some(now);
+    let span_x = (overview.max_x - overview.min_x).max(0.01);
+    let span_z = (overview.max_z - overview.min_z).max(0.01);
+    state.center_x -= dx * dt * 0.85 * span_x / state.zoom;
+    state.center_z += dz * dt * 0.85 * span_z / state.zoom;
+}
+
+fn pan_from_drag(state: &mut PickerState, overview: &MapOverview, cursor_uv: Option<(f32, f32)>, dragging: bool) {
+    if !dragging {
+        state.drag = None;
+        return;
+    }
+    let Some((u, v)) = cursor_uv else { return };
+    if let Some((u0, v0)) = state.drag {
+        let span_x = (overview.max_x - overview.min_x).max(0.01);
+        let span_z = (overview.max_z - overview.min_z).max(0.01);
+        state.center_x += (u - u0) * span_x / state.zoom;
+        state.center_z -= (v - v0) * span_z / state.zoom;
+    }
+    state.drag = Some((u, v));
+}
+
+fn window_to_xz(u: f32, v: f32, window: &MapWindow) -> (f32, f32) {
+    (
+        window.max_x - u * (window.max_x - window.min_x),
+        window.max_z - v * (window.max_z - window.min_z),
+    )
+}
+
+/// Crop of the 512² overview. `None` is the whole texture, which is zoom 1.
+fn picker_crop(overview: &MapOverview, window: &MapWindow) -> Option<Rect> {
+    let span_x = (overview.max_x - overview.min_x).max(0.01);
+    let span_z = (overview.max_z - overview.min_z).max(0.01);
+    let u0 = (overview.max_x - window.max_x) / span_x;
+    let u1 = (overview.max_x - window.min_x) / span_x;
+    let v0 = (overview.max_z - window.max_z) / span_z;
+    let v1 = (overview.max_z - window.min_z) / span_z;
+    if u0 <= 0.001 && v0 <= 0.001 && u1 >= 0.999 && v1 >= 0.999 {
+        return None;
+    }
+    Some(Rect::from_corners(
+        Vec2::new(u0.clamp(0., 1.) * SIZE as f32, v0.clamp(0., 1.) * SIZE as f32),
+        Vec2::new(u1.clamp(0., 1.) * SIZE as f32, v1.clamp(0., 1.) * SIZE as f32),
+    ))
 }
 
 fn place_pins(
     overview: &MapOverview,
-    pins: &mut Query<(&MinimapPin, &mut Node, &mut UiTransform), (Without<MinimapImage>, Without<MinimapRoot>)>,
+    pins: &mut Query<(&MinimapPin, &mut Node, &mut UiTransform), (Without<MinimapImage>, Without<MinimapRoot>, Without<MinimapFrame>, Without<MinimapNorth>)>,
     layout: Layout,
     x: f32,
     z: f32,
     yaw: f32,
+    frame: f32,
     spawn: Option<[f32; 3]>,
     session: Option<[f32; 3]>,
 ) {
@@ -451,15 +685,15 @@ fn place_pins(
             continue;
         };
         node.display = Display::Flex;
-        let (x, y) = pin_px(overview, &layout, spot[0], spot[2], FRAME);
+        let (x, y) = pin_px(overview, &layout, spot[0], spot[2], frame);
         node.left = Val::Px(x - 5.);
         node.top = Val::Px(y - 5.);
-        transform.rotation = if rotate { Rot2::radians(-yaw) } else { Rot2::IDENTITY };
+        transform.rotation = if rotate { Rot2::radians(marker_angle(yaw)) } else { Rot2::IDENTITY };
     }
 }
 
 fn place_picker_pins(
-    overview: &MapOverview,
+    window: &MapWindow,
     pins: &mut Query<(&PickerPin, &mut Node, &mut UiTransform), (Without<PickerImage>, Without<PickerRoot>)>,
     layout: Layout,
     x: f32,
@@ -470,12 +704,26 @@ fn place_picker_pins(
     for (pin, mut node, mut transform) in pins.iter_mut() {
         let spot = if pin.0 == 0 { Some([x, 0., z]) } else { spawn };
         let Some(spot) = spot else { node.display = Display::None; continue; };
+        let Some((px, py)) = pin_in_window(window, &layout, spot[0], spot[2]) else {
+            node.display = Display::None;
+            continue;
+        };
         node.display = Display::Flex;
-        let (px, py) = pin_px(overview, &layout, spot[0], spot[2], PICKER);
         node.left = Val::Px(px - 5.);
         node.top = Val::Px(py - 5.);
-        transform.rotation = if pin.0 == 0 { Rot2::radians(-yaw) } else { Rot2::IDENTITY };
+        transform.rotation = if pin.0 == 0 { Rot2::radians(marker_angle(yaw)) } else { Rot2::IDENTITY };
     }
+}
+
+fn pin_in_window(window: &MapWindow, layout: &Layout, x: f32, z: f32) -> Option<(f32, f32)> {
+    let span_x = (window.max_x - window.min_x).max(0.01);
+    let span_z = (window.max_z - window.min_z).max(0.01);
+    let u = (window.max_x - x) / span_x;
+    let v = (window.max_z - z) / span_z;
+    if !(0. ..=1.).contains(&u) || !(0. ..=1.).contains(&v) {
+        return None;
+    }
+    Some((layout.left + u * layout.image_w, layout.top + v * layout.image_h))
 }
 
 fn pin_px(overview: &MapOverview, layout: &Layout, x: f32, z: f32, frame: f32) -> (f32, f32) {
@@ -485,22 +733,74 @@ fn pin_px(overview: &MapOverview, layout: &Layout, x: f32, z: f32, frame: f32) -
     (x.clamp(6., frame - 6.), y.clamp(6., frame - 6.))
 }
 
+/// Nose graphic points up the screen (local -Y). Positive yaw faces +X, which is screen left.
+/// Bevy's `Rot2` is counterclockwise and UI +Y points down, so the mirrored angle is `-yaw`.
+fn marker_angle(yaw: f32) -> f32 { -yaw }
+
+/// `RelativeCursorPosition.normalized` is centered on the node.
+fn cursor_to_uv(x: f32, y: f32) -> (f32, f32) {
+    ((x + 0.5).clamp(0., 1.), (y + 0.5).clamp(0., 1.))
+}
+
 fn uv_of(overview: &MapOverview, x: f32, z: f32) -> (f32, f32) {
     let span_x = (overview.max_x - overview.min_x).max(0.01);
     let span_z = (overview.max_z - overview.min_z).max(0.01);
-    ((x - overview.min_x) / span_x, (overview.max_z - z) / span_z)
+    ((overview.max_x - x) / span_x, (overview.max_z - z) / span_z)
 }
 
 fn uv_to_xz(u: f32, v: f32, overview: &MapOverview) -> (f32, f32) {
-    let x = overview.min_x + u * (overview.max_x - overview.min_x);
+    let x = overview.max_x - u * (overview.max_x - overview.min_x);
     let z = overview.max_z - v * (overview.max_z - overview.min_z);
     (x, z)
 }
 
-pub(crate) fn ground_y(world: &BoardWorld, x: f32, z: f32, min_y: f32, max_y: f32) -> Option<f32> {
-    let start = Vector3::new(x, max_y + 50., z);
-    let end = Vector3::new(x, min_y - 10., z);
-    world.query_thin_line(start, end).ok().flatten().map(|hit| hit.geometry.position.y)
+/// Lowest upward surface at `(x, z)` that has `HEADROOM` metres clear above it.
+/// The catch floor under `y = -0.1` is ignored while any other hit exists, so a roof
+/// does not hide the street and the safety plane does not hide the street either.
+pub(crate) fn walkable_surface(world: &BoardWorld, x: f32, z: f32, min_y: f32, max_y: f32) -> Option<f32> {
+    let mut top = max_y + 50.;
+    let bottom = min_y - 10.;
+    let mut heights = Vec::new();
+    for _ in 0..48 {
+        if top <= bottom { break; }
+        let Ok(Some(hit)) = world.query_thin_line(Vector3::new(x, top, z), Vector3::new(x, bottom, z)) else { break };
+        let y = hit.geometry.position.y;
+        if hit.geometry.normal.y >= WALKABLE && y.is_finite() {
+            heights.push(y);
+        }
+        let next = y - 0.05;
+        if next >= top - 0.001 { break; }
+        top = next;
+    }
+    lowest_open(&heights)
+}
+
+/// Contact height for a package spawn. A point already on or above the surface stays
+/// there (retail drop-ins). A point below the surface is lifted onto it.
+pub(crate) fn contact_height(world: &BoardWorld, x: f32, z: f32, authored: f32) -> f32 {
+    let (min_y, max_y) = world.triangles().iter().flat_map(|triangle| triangle.triangle.vertices).fold(
+        (f32::MAX, f32::MIN),
+        |(min_y, max_y), point| (min_y.min(point.y), max_y.max(point.y)),
+    );
+    if !min_y.is_finite() || !max_y.is_finite() {
+        return authored;
+    }
+    match walkable_surface(world, x, z, min_y, max_y) {
+        Some(surface) if authored + 0.05 < surface => surface,
+        _ => authored,
+    }
+}
+
+fn board_lift(physics: &GamePhysics) -> f32 {
+    physics.settings.wheel_radius - physics.settings.authored[0].translation.y
+}
+
+fn lowest_open(heights: &[f32]) -> Option<f32> {
+    let raised: Vec<f32> = heights.iter().copied().filter(|y| *y >= -0.1).collect();
+    let set = if raised.is_empty() { heights } else { raised.as_slice() };
+    set.iter().copied().filter(|y| {
+        !set.iter().any(|other| *other > *y + 0.05 && *other < *y + HEADROOM)
+    }).reduce(f32::min)
 }
 
 fn placement(skater: &SkaterRuntime, x: f32, y: f32, z: f32) -> [[f32; 4]; 4] {
@@ -528,9 +828,66 @@ fn rasterize(triangles: &[WorldTriangle]) -> Raster {
         if p.iter().any(|corner| corner.iter().any(|value| !value.is_finite())) { return None; }
         let normal = triangle.triangle.feature.normal;
         let ny = if normal.x * normal.x + normal.y * normal.y + normal.z * normal.z > 1e-8 { normal.y } else { 1. };
-        Some(PlotTri { p, ny })
+        Some(PlotTri { p, ny, color: None })
     }).collect();
     rasterize_plots(&plotted)
+}
+
+/// Render-mesh overview. Stored textures are bottom-up and the UVs match that, so the sample uses them directly.
+pub(crate) fn picture_of(map: &SkateMap) -> MapPicture {
+    let plotted: Vec<PlotTri> = map.geometry.indices.chunks_exact(3).filter_map(|tri| {
+        let verts = [
+            map.geometry.vertices.get(tri[0] as usize)?,
+            map.geometry.vertices.get(tri[1] as usize)?,
+            map.geometry.vertices.get(tri[2] as usize)?,
+        ];
+        let p = [verts[0].position, verts[1].position, verts[2].position];
+        if p.iter().any(|corner| corner.iter().any(|value| !value.is_finite())) { return None; }
+        let edge_u = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+        let edge_v = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+        let cross = [
+            edge_u[1] * edge_v[2] - edge_u[2] * edge_v[1],
+            edge_u[2] * edge_v[0] - edge_u[0] * edge_v[2],
+            edge_u[0] * edge_v[1] - edge_u[1] * edge_v[0],
+        ];
+        let length = cross.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let ny = if length > 1e-8 { cross[1] / length } else { 1. };
+        let uv = [
+            (verts[0].uv[0] + verts[1].uv[0] + verts[2].uv[0]) / 3.,
+            (verts[0].uv[1] + verts[1].uv[1] + verts[2].uv[1]) / 3.,
+        ];
+        Some(PlotTri { p, ny, color: Some(sample_albedo(map, verts[0].material, uv)) })
+    }).collect();
+    let raster = rasterize_plots(&plotted);
+    MapPicture {
+        rgba: raster.rgba,
+        min_x: raster.min_x,
+        max_x: raster.max_x,
+        min_z: raster.min_z,
+        max_z: raster.max_z,
+        min_y: raster.min_y,
+        max_y: raster.max_y,
+    }
+}
+
+fn sample_albedo(map: &SkateMap, material: u32, uv: [f32; 2]) -> [u8; 3] {
+    let fallback = map.materials.get(material.saturating_sub(1) as usize).map(|material| {
+        material.color.map(|channel| (channel.clamp(0., 1.) * 255.) as u8)
+    }).unwrap_or([180, 180, 180]);
+    let Some(material) = map.materials.get(material.saturating_sub(1) as usize) else { return fallback };
+    let id = material.textures[0] as usize;
+    if id == 0 || id > map.textures.len() { return fallback; }
+    let texture = &map.textures[id - 1];
+    if texture.width == 0 || texture.height == 0 { return fallback; }
+    let pixels = texture.width as usize * texture.height as usize;
+    if texture.rgba.len() < pixels * 4 { return fallback; }
+    let u = uv[0] - uv[0].floor();
+    let v = uv[1] - uv[1].floor();
+    let x = ((u * texture.width as f32) as usize).min(texture.width as usize - 1);
+    // Row 0 of the stored image is the bottom, matching v = 0.
+    let y = ((v * texture.height as f32) as usize).min(texture.height as usize - 1);
+    let index = (y * texture.width as usize + x) * 4;
+    [texture.rgba[index], texture.rgba[index + 1], texture.rgba[index + 2]]
 }
 
 fn rasterize_plots(triangles: &[PlotTri]) -> Raster {
@@ -572,7 +929,7 @@ fn rasterize_plots(triangles: &[PlotTri]) -> Raster {
     }
     let project = |x: f32, z: f32| -> [f32; 2] {
         [
-            (x - min_x) / span_x * (SIZE as f32 - 1.),
+            (max_x - x) / span_x * (SIZE as f32 - 1.),
             (max_z - z) / span_z * (SIZE as f32 - 1.),
         ]
     };
@@ -592,7 +949,7 @@ fn rasterize_plots(triangles: &[PlotTri]) -> Raster {
                 let index = j * SIZE + i;
                 if y <= height[index] { continue; }
                 height[index] = y;
-                let color = shade(y, triangle.ny, min_y, max_y);
+                let color = paint(triangle, y, min_y, max_y);
                 rgba[index * 4..index * 4 + 4].copy_from_slice(&color);
             }
         }
@@ -623,6 +980,13 @@ fn barycentric(px: f32, py: f32, a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> Optio
     let along_a = 1. - along_c - along_b;
     if along_a < -0.01 || along_b < -0.01 || along_c < -0.01 { return None; }
     Some((along_a, along_b, along_c))
+}
+
+fn paint(triangle: &PlotTri, y: f32, min_y: f32, max_y: f32) -> [u8; 4] {
+    let Some(rgb) = triangle.color else { return shade(y, triangle.ny, min_y, max_y); };
+    let light = 0.62 + 0.38 * triangle.ny.abs().clamp(0., 1.);
+    let scale = |channel: u8| (channel as f32 * light).clamp(0., 255.) as u8;
+    [scale(rgb[0]), scale(rgb[1]), scale(rgb[2]), 255]
 }
 
 fn shade(y: f32, ny: f32, min_y: f32, max_y: f32) -> [u8; 4] {
@@ -723,6 +1087,7 @@ mod tests {
         let triangle = PlotTri {
             p: [[-10., 2., -10.], [10., 2., -10.], [0., 4., 10.]],
             ny: 1.,
+            color: None,
         };
         let raster = rasterize_plots(&[triangle]);
         let mid = SIZE / 2 * SIZE + SIZE / 2;
@@ -732,8 +1097,8 @@ mod tests {
 
     #[test]
     fn the_catch_floor_does_not_cover_real_ground() {
-        let ground = PlotTri { p: [[-2., 1., -2.], [2., 1., -2.], [0., 1., 2.]], ny: 1. };
-        let floor = PlotTri { p: [[-50., -0.25, -50.], [50., -0.25, -50.], [0., -0.25, 50.]], ny: 1. };
+        let ground = PlotTri { p: [[-2., 1., -2.], [2., 1., -2.], [0., 1., 2.]], ny: 1., color: None };
+        let floor = PlotTri { p: [[-50., -0.25, -50.], [50., -0.25, -50.], [0., -0.25, 50.]], ny: 1., color: None };
         let raster = rasterize_plots(&[floor, ground]);
         let mid = SIZE / 2 * SIZE + SIZE / 2;
         assert_ne!(&raster.rgba[mid * 4..mid * 4 + 3], &[18, 24, 28]);
@@ -752,5 +1117,124 @@ mod tests {
         assert!(error.contains("could not be read"), "{error}");
         assert_eq!(saved_spawn(&assets, &map), Some([1.5, 3.25, -2.]));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_hud_node_queries_can_be_scheduled_together() {
+        let mut app = App::new();
+        app.init_resource::<MapOverview>().add_systems(Update, update_hud);
+        app.update();
+    }
+
+    #[test]
+    fn the_whole_map_fits_and_a_click_lands_on_the_same_spot() {
+        let overview = MapOverview {
+            image: Handle::default(),
+            min_x: -20., max_x: 20., min_z: -5., max_z: 5., min_y: 0., max_y: 1., ready: true,
+        };
+        let layout = fit_layout(&overview, 100.);
+        assert!((layout.image_w - 100.).abs() < 0.01, "{}", layout.image_w);
+        assert!((layout.image_h - 25.).abs() < 0.01, "{}", layout.image_h);
+        assert!((layout.top - 37.5).abs() < 0.01, "{}", layout.top);
+        let (u, v) = cursor_to_uv(-0.5, -0.5);
+        let (x, z) = uv_to_xz(u, v, &overview);
+        assert!((x - overview.max_x).abs() < 0.01 && (z - overview.max_z).abs() < 0.01, "{x} {z}");
+        let (u, v) = cursor_to_uv(0., 0.);
+        let (x, z) = uv_to_xz(u, v, &overview);
+        assert!(x.abs() < 0.01 && z.abs() < 0.01, "{x} {z}");
+        let (px, py) = pin_px(&overview, &layout, 0., 0., 100.);
+        assert!((px - 50.).abs() < 0.1 && (py - 50.).abs() < 0.1, "{px} {py}");
+    }
+
+    #[test]
+    fn zooming_keeps_the_point_under_the_cursor() {
+        let overview = MapOverview {
+            image: Handle::default(),
+            min_x: -200., max_x: 200., min_z: -50., max_z: 50., min_y: 0., max_y: 1., ready: true,
+        };
+        let whole = map_window(&overview, 1., 0., 0.);
+        assert!((whole.min_x - overview.min_x).abs() < 0.01 && (whole.max_z - overview.max_z).abs() < 0.01);
+        assert!(picker_crop(&overview, &whole).is_none());
+        let layout = fit_window(&whole, 100.);
+        let full = fit_layout(&overview, 100.);
+        assert!((layout.image_w - full.image_w).abs() < 0.01 && (layout.image_h - full.image_h).abs() < 0.01);
+        let (u, v) = (0.8, 0.25);
+        let (x, z) = window_to_xz(u, v, &whole);
+        let mut state = PickerState { center_x: 0., center_z: 0., ..PickerState::default() };
+        zoom_about(&mut state, &overview, 4_f32.log(PICKER_ZOOM_STEP), Some((u, v)));
+        let window = map_window(&overview, state.zoom, state.center_x, state.center_z);
+        state.center_x = (window.min_x + window.max_x) * 0.5;
+        state.center_z = (window.min_z + window.max_z) * 0.5;
+        let window = map_window(&overview, state.zoom, state.center_x, state.center_z);
+        let (x2, z2) = window_to_xz(u, v, &window);
+        assert!((x2 - x).abs() < 0.05 && (z2 - z).abs() < 0.05, "{x2} {z2} vs {x} {z}");
+        assert!((state.zoom - 4.).abs() < 0.02, "{}", state.zoom);
+        let zoomed = fit_window(&window, 100.);
+        let (px, py) = pin_in_window(&window, &zoomed, x, z).unwrap();
+        assert!((px - (zoomed.left + u * zoomed.image_w)).abs() < 0.1, "{px}");
+        assert!((py - (zoomed.top + v * zoomed.image_h)).abs() < 0.1, "{py}");
+        let crop = picker_crop(&overview, &window).unwrap();
+        assert!((crop.min.x / SIZE as f32 - (overview.max_x - window.max_x) / 400.).abs() < 0.01);
+        assert!(pin_in_window(&window, &zoomed, overview.min_x, overview.min_z).is_none());
+    }
+
+    #[test]
+    fn a_textured_triangle_keeps_its_color() {
+        let triangle = PlotTri {
+            p: [[-10., 2., -10.], [10., 2., -10.], [0., 4., 10.]],
+            ny: 1.,
+            color: Some([200, 20, 20]),
+        };
+        let raster = rasterize_plots(&[triangle]);
+        let mid = SIZE / 2 * SIZE + SIZE / 2;
+        let pixel = &raster.rgba[mid * 4..mid * 4 + 3];
+        assert!(pixel[0] > pixel[1] && pixel[0] > pixel[2], "{pixel:?}");
+    }
+
+    #[test]
+    fn yaw_zero_points_up_and_positive_x_points_left() {
+        let nose = |yaw: f32| {
+            let (s, c) = marker_angle(yaw).sin_cos();
+            [s, -c]
+        };
+        assert!(nose(0.)[1] < -0.9 && nose(0.)[0].abs() < 0.01);
+        assert!(nose(std::f32::consts::FRAC_PI_2)[0] < -0.9 && nose(std::f32::consts::FRAC_PI_2)[1].abs() < 0.01);
+    }
+
+    #[test]
+    fn positive_x_paints_the_left_side() {
+        let east = PlotTri { p: [[5., 1., -2.], [15., 1., -2.], [10., 1., 2.]], ny: 1., color: Some([220, 20, 20]) };
+        let west = PlotTri { p: [[-15., 1., -2.], [-5., 1., -2.], [-10., 1., 2.]], ny: 1., color: Some([20, 20, 220]) };
+        let raster = rasterize_plots(&[east, west]);
+        let left = (SIZE / 4) * 4 + (SIZE / 2) * SIZE * 4;
+        let right = (SIZE * 3 / 4) * 4 + (SIZE / 2) * SIZE * 4;
+        assert!(raster.rgba[left] > raster.rgba[left + 2], "left {:?}", &raster.rgba[left..left + 3]);
+        assert!(raster.rgba[right + 2] > raster.rgba[right], "right {:?}", &raster.rgba[right..right + 3]);
+    }
+
+    #[test]
+    fn walkable_ground_prefers_the_open_floor_over_a_roof_or_catch_plane() {
+        let mut triangles = quad(0.);
+        triangles.extend(quad(40.));
+        triangles.extend(quad(-0.25));
+        let world = BoardWorld::new(triangles);
+        let floor = walkable_surface(&world, 0., 0., -1., 50.).unwrap();
+        assert!(floor.abs() < 0.2, "{floor}");
+        assert!((contact_height(&world, 0., 0., 0.5) - 0.5).abs() < 0.01);
+        let high = BoardWorld::new(quad(40.));
+        assert!((contact_height(&high, 0., 0., 1.) - 40.).abs() < 0.2);
+        let raised = BoardWorld::new({ let mut t = quad(5.); t.extend(quad(-0.25)); t });
+        assert!((walkable_surface(&raised, 0., 0., -1., 10.).unwrap() - 5.).abs() < 0.2);
+    }
+
+    fn quad(y: f32) -> Vec<WorldTriangle> {
+        use skate_core::physics::collision::TriangleFeature;
+        use skate_core::physics::contact::RetailContactMaterial;
+        let material = RetailContactMaterial { static_friction: 0., dynamic_friction: 0., restitution: 0. };
+        let v = |x, z| Vector3::new(x, y, z);
+        let corners = [v(-20., -20.), v(20., -20.), v(20., 20.), v(-20., 20.)];
+        [[0usize, 2, 1], [0, 3, 2]].into_iter().map(|ids| {
+            WorldTriangle::from_vertices(ids.map(|index| corners[index]), material, 1, TriangleFeature::ONE_SIDED, [1.; 3], 0.).unwrap()
+        }).collect()
     }
 }
