@@ -36,6 +36,7 @@ fn default_sky() -> String { "University".into() }
 fn default_brightness() -> u32 { 100 }
 fn default_minimap() -> bool { true }
 fn default_minimap_size() -> u32 { 180 }
+fn default_fullscreen() -> bool { false }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -64,6 +65,9 @@ struct GraphicsSettings {
     /// Square minimap side, in pixels. The picture keeps its aspect inside it.
     #[serde(default = "default_minimap_size")]
     minimap_size: u32,
+    /// Borderless fullscreen on the primary monitor. Older settings files stay windowed.
+    #[serde(default = "default_fullscreen")]
+    fullscreen: bool,
 }
 impl Default for GraphicsSettings {
     fn default() -> Self {
@@ -81,6 +85,7 @@ impl Default for GraphicsSettings {
             world_brightness: default_brightness(),
             minimap: true,
             minimap_size: default_minimap_size(),
+            fullscreen: false,
         }
     }
 }
@@ -255,7 +260,7 @@ impl Menu {
             }
             1 if self.difficulty == Difficulty::Custom => std::iter::once(3).chain(300..337).chain([CAMERA_ANGLE_ROW,8,10]).collect(),
             1 => vec![3, CAMERA_ANGLE_ROW, 8, 10],
-            2 => vec![0, 1, 2, 13, 16, 17, 18, FRAME_STATS_ROW, 67, 68],
+            2 => vec![0, 70, 1, 2, 13, 16, 17, 18, FRAME_STATS_ROW, 67, 68],
             4 => vec![7, 11, 14, 19],
             5 => vec![62, 4, 9, 15],
             i if i >= SECTIONS.len() => self.custom_sections.get(i-SECTIONS.len()).map_or(Vec::new(), |(_,entries)| (200..200+entries.len()).collect()),
@@ -397,7 +402,7 @@ fn setup(
                 body.spawn((Text::new(""),MenuSubtitle,TextFont {font_size:16.,..default()},TextColor(Color::srgb(0.65,0.72,0.72))));
                 body.spawn((Node {height:px(3),width:px(64),margin:UiRect::bottom(px(10)),..default()},BackgroundColor(Color::srgb(0.78,0.96,0.3))));
                 body.spawn((MenuScroll,ScrollPosition::default(),Node {flex_grow:1.,min_height:px(0),overflow:Overflow::scroll_y(),flex_direction:FlexDirection::Column,row_gap:px(8),..default()})).with_children(|list| {
-                    for i in [62].into_iter().chain([0, 1, 2, 63, 64, 69, 3]).chain(300..337).chain(4..10).chain(11..20).chain(20..27).chain([10, FRAME_STATS_ROW, 67, 68, 66, 65, 60, 61]).chain(200..264).chain([50, 51]).chain(1000..1160).chain(1_000_000..1_000_000+destinations.len()) {
+                    for i in [62].into_iter().chain([0, 70, 1, 2, 63, 64, 69, 3]).chain(300..337).chain(4..10).chain(11..20).chain(20..27).chain([10, FRAME_STATS_ROW, 67, 68, 66, 65, 60, 61]).chain(200..264).chain([50, 51]).chain(1000..1160).chain(1_000_000..1_000_000+destinations.len()) {
                         list.spawn((Button,MenuRow(i),Node {flex_direction:if (300..335).contains(&i) {FlexDirection::Column} else {FlexDirection::Row},width:percent(100),min_height:px(56),flex_shrink:0.,padding:UiRect::axes(px(18),px(12)),align_items:AlignItems::Center,border_radius:BorderRadius::all(px(4)),..default()},BackgroundColor(Color::srgb(0.075,0.09,0.095))))
                             .with_children(|row| {
                                 row.spawn((MenuLabel(i),Text::new(""),TextFont {font_size:18.,..default()},TextColor(Color::WHITE)));
@@ -556,7 +561,7 @@ pub(crate) fn interact(
         if keys.just_pressed(KeyCode::ArrowDown) || nav.pressed & 2 != 0 {
             menu.selected = visible[(index + 1) % rows];
         }
-        let adjustable = (menu.section == 1 && menu.difficulty == Difficulty::Custom && (300..335).contains(&menu.selected)) || (menu.daylight && (menu.selected < 3 || matches!(menu.selected, 63 | 64))) || (!menu.multiplayer && !menu.daylight && (menu.selected < 4 || AUDIO_ROWS.contains(&menu.selected) || menu.selected == FRAME_STATS_ROW || menu.selected == 67 || menu.selected == 68))
+        let adjustable = (menu.section == 1 && menu.difficulty == Difficulty::Custom && (300..335).contains(&menu.selected)) || (menu.daylight && (menu.selected < 3 || matches!(menu.selected, 63 | 64))) || (!menu.multiplayer && !menu.daylight && (menu.selected < 4 || AUDIO_ROWS.contains(&menu.selected) || menu.selected == FRAME_STATS_ROW || menu.selected == 67 || menu.selected == 68 || menu.selected == 70))
             || (!menu.multiplayer && !menu.daylight && menu.section == 1 && menu.selected == CAMERA_ANGLE_ROW)
             || (menu.section == 5 && matches!(menu.selected, 4 | 9 | 15 | 62))
             || (menu.section == 0 && menu.selected == 60);
@@ -706,6 +711,7 @@ pub(crate) fn interact(
                     );
                     (menu.settings.width, menu.settings.height) = size;
                 }
+                70 => menu.settings.fullscreen = !menu.settings.fullscreen,
                 1 => menu.settings.scale = cycle(SCALES, menu.settings.scale, direction),
                 2 => menu.settings.fps = cycle(LIMITS, menu.settings.fps, direction),
                 3 => {
@@ -780,7 +786,7 @@ pub(crate) fn interact(
                 _ => {}
             }
         }
-        if ((!menu.multiplayer && !menu.daylight && !day_action) && (row < 3 || row == FRAME_STATS_ROW || row == 67 || row == 68))
+        if ((!menu.multiplayer && !menu.daylight && !day_action) && (row < 3 || row == FRAME_STATS_ROW || row == 67 || row == 68 || row == 70))
             || (day_action && (row < 3 || row == 63 || row == 64))
         {
             let save = (|| -> Result<(), String> {
@@ -817,23 +823,15 @@ fn controller_label(input: &crate::input::ControllerInput) -> String {
 
 fn toggle_fullscreen(
     keys: Res<ButtonInput<KeyCode>>,
-    menu: Res<Menu>,
-    mut window: Single<&mut Window, With<PrimaryWindow>>,
+    mut menu: ResMut<Menu>,
 ) {
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     if !alt || !keys.just_pressed(KeyCode::Enter) {
         return;
     }
-    match window.mode {
-        WindowMode::Windowed => {
-            window.mode = WindowMode::BorderlessFullscreen(MonitorSelection::Primary);
-        }
-        WindowMode::BorderlessFullscreen(_) | WindowMode::Fullscreen(_, _) => {
-            window.mode = WindowMode::Windowed;
-            window
-                .resolution
-                .set_physical_resolution(menu.settings.width, menu.settings.height);
-        }
+    menu.settings.fullscreen = !menu.settings.fullscreen;
+    if let Err(error) = menu.write_settings() {
+        menu.status = format!("Could not save: {error}");
     }
 }
 fn apply(
@@ -843,11 +841,16 @@ fn apply(
     mut images: ResMut<Assets<Image>>,
     mut previous: Local<Option<GraphicsSettings>>,
 ) {
-    if window.mode == WindowMode::Windowed
-        && previous
-            .as_ref()
-            .is_none_or(|p| p.width != menu.settings.width || p.height != menu.settings.height)
+    if menu.settings.fullscreen {
+        if !matches!(window.mode, WindowMode::BorderlessFullscreen(_)) {
+            window.mode = WindowMode::BorderlessFullscreen(MonitorSelection::Primary);
+        }
+    } else if window.mode != WindowMode::Windowed
+        || previous.as_ref().is_none_or(|p| {
+            p.fullscreen || p.width != menu.settings.width || p.height != menu.settings.height
+        })
     {
+        window.mode = WindowMode::Windowed;
         window
             .resolution
             .set_physical_resolution(menu.settings.width, menu.settings.height);
@@ -1012,6 +1015,7 @@ fn labels(
         } else {
             match label.0 {
                 0 => format!("Resolution          {} x {}", s.width, s.height),
+                70 => format!("Fullscreen            {}", if s.fullscreen { "On" } else { "Off" }),
                 1 => format!(
                     "Internal resolution   {}%  ({} x {})",
                     s.scale, size.x, size.y
@@ -1243,7 +1247,7 @@ mod tests {
             unique.dedup();
             assert_eq!(unique.len(), rows.len(), "duplicate row ids in section {section}: {rows:?}");
             // Audio, controller identity, frame-time, import, sky, minimap and map-place rows are spawned.
-            assert!(rows.iter().all(|id| *id < 20 || *id == FRAME_STATS_ROW || matches!(*id, 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69) || *id >= 1000));
+            assert!(rows.iter().all(|id| *id < 20 || *id == FRAME_STATS_ROW || matches!(*id, 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 70) || *id >= 1000));
         }
         menu.select_section(1);
         assert_eq!(menu.rows(),vec![3,CAMERA_ANGLE_ROW,8,10]);
@@ -1282,7 +1286,7 @@ mod tests {
         assert!(!SECTIONS.iter().any(|(name,_)| matches!(*name,"SESSION"|"WORLD")));
         menu.select_section(2);
         assert!(!menu.multiplayer && !menu.browser);
-        assert_eq!(menu.rows(), vec![0,1,2,13,16,17,18,FRAME_STATS_ROW,67,68]);
+        assert_eq!(menu.rows(), vec![0,70,1,2,13,16,17,18,FRAME_STATS_ROW,67,68]);
         menu.daylight = true;
         assert_eq!(menu.rows(), vec![0, 1, 2, 63, 64, 69, 3]);
     }
@@ -1291,7 +1295,12 @@ mod tests {
         assert!(!GraphicsSettings::default().frame_stats);
         // Settings files written before the row existed keep working.
         let old: GraphicsSettings = serde_json::from_str(r#"{"width":1920,"height":1080,"scale":100,"fps":0}"#).unwrap();
-        assert!(!old.validated().frame_stats);
+        let old = old.validated();
+        assert!(!old.frame_stats);
+        assert!(!old.fullscreen);
+        let full = GraphicsSettings { fullscreen: true, ..default() };
+        let saved: GraphicsSettings = serde_json::from_slice(&serde_json::to_vec(&full).unwrap()).unwrap();
+        assert!(saved.fullscreen);
         let on = GraphicsSettings { frame_stats: true, ..default() };
         let saved: GraphicsSettings = serde_json::from_slice(&serde_json::to_vec(&on).unwrap()).unwrap();
         assert!(saved.validated().frame_stats);
